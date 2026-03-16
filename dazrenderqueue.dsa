@@ -1,15 +1,8 @@
 (function(){
 
-    // --- 1. CONFIGURATION ---
-    var sWorkingDir = "C:/Users/YS/Pictures/test/"; 
-    var sStateFile  = sWorkingDir + "queue_state.json"; 
-    var sPathFile   = sWorkingDir + "last_path.txt"; 
+    var sStateFile  = App.getTempPath() + "/queue_state.json"; 
     var sBatchFile  = App.getTempPath() + "/restart_daz.bat";
-    
-    var oDir = new DzDir(sWorkingDir);
-    if( !oDir.exists() ){ oDir.mkpath(sWorkingDir); }
 
-    // --- 2. INTERNAL STATE ---
     var aQueue =[];
     var oState = {
         sceneIdx: 0,
@@ -21,7 +14,6 @@
     var bRestartNeeded = false; 
     var bCancelQueue = false;
 
-    // --- 3. HELPERS ---
     function getInt( wWidget, nDef ){
         try {
             var n = parseInt( wWidget.text );
@@ -42,38 +34,58 @@
     }
 
     function loadLastDir(){
-        var oFile = new DzFile(sPathFile);
-        if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
-            var sStoredPath = oFile.readLine().trim();
-            oFile.close();
-            if( sStoredPath != "" ){
-                var oTestDir = new DzDir(sStoredPath);
-                if( oTestDir.exists() ) return sStoredPath;
-            }
-        }
-        return sWorkingDir;
+        var oSettings = new DzAppSettings("RenderQueue");
+        return oSettings.getStringValue("LastOpenDir", App.getDocumentsPath());
     }
 
     function saveLastDir( sPath ){
-        var oFile = new DzFile(sPathFile);
-        if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
-            oFile.writeLine( sPath );
-            oFile.close();
-        }
+        var oSettings = new DzAppSettings("RenderQueue");
+        oSettings.setStringValue("LastOpenDir", sPath);
     }
 
     function getJobStatusStr(job) {
         if(job.done) return " [DONE]";
-        return (job.override && (job.start !== job.end)) ? (" [Frames " + job.start + "-" + job.end + "]") : " [Single Frame]";
+        return (job.override && (job.start !== job.end)) ? ("[Frames " + job.start + "-" + job.end + "]") : " [Single Frame]";
     }
 
     var sLastOpenDir = loadLastDir();
     
-    // --- 4. UI SETUP ---
     var wDlg = new DzDialog();
-    wDlg.caption = "Pro Render Queue Manager V2.4";
+    wDlg.caption = "Pro Render Queue Manager V2.6";
     wDlg.width = 750; wDlg.height = 650;
     var wLayout = new DzVBoxLayout(wDlg);
+
+    var wGrpOut = new DzGroupBox(wDlg);
+    wGrpOut.title = "Render Output Directory";
+    var wOutLayout = new DzGridLayout(wGrpOut); 
+    
+    var wLineOut = new DzLineEdit(wGrpOut);
+    var oInitSettings = new DzAppSettings("RenderQueue");
+    wLineOut.text = oInitSettings.getStringValue("OutputDir", App.getDocumentsPath() + "/RenderQueue/");
+    
+    var wBtnOutBrowse = new DzPushButton(wGrpOut); 
+    wBtnOutBrowse.text = "Browse...";
+    wBtnOutBrowse.maxWidth = 80;
+    
+    wOutLayout.addWidget(wLineOut, 0, 0);
+    wOutLayout.addWidget(wBtnOutBrowse, 0, 1);
+    wLayout.addWidget(wGrpOut);
+    
+    wBtnOutBrowse.clicked.connect(function(){
+        var sDir = FileDialog.doDirectoryDialog("Select Output Directory", "", wLineOut.text);
+        if(sDir){
+            var sFormatted = sDir.replace(/\\/g, "/");
+            if(!sFormatted.endsWith("/")) sFormatted += "/";
+            wLineOut.text = sFormatted;
+            var oSettings = new DzAppSettings("RenderQueue");
+            oSettings.setStringValue("OutputDir", sFormatted);
+        }
+    });
+    
+    wLineOut.textChanged.connect(function(text){
+        var oSettings = new DzAppSettings("RenderQueue");
+        oSettings.setStringValue("OutputDir", text);
+    });
 
     var lblInfo = new DzLabel(wDlg);
     lblInfo.text = "Queue List (Double-Click an item to change Camera/Frames):";
@@ -219,16 +231,65 @@
         if( !item ) return;
         var idx = getItemIndex( wList, item );
         var job = aQueue[idx];
-        var wEditDlg = new DzBasicDialog(); wEditDlg.caption = "Scene Options";
-        var wEditLyt = new DzVBoxLayout(wEditDlg); 
-        var wEditCam = new DzLineEdit(wEditDlg); wEditCam.text = job.cam; wEditLyt.addWidget(wEditCam);
-        var wEditChk = new DzCheckBox(wEditDlg); wEditChk.text = "Override Frames?"; wEditChk.checked = job.override; wEditLyt.addWidget(wEditChk);
-        var wEditStart = new DzLineEdit(wEditDlg); wEditStart.text = job.start.toString(); wEditLyt.addWidget(wEditStart);
-        var wEditEnd = new DzLineEdit(wEditDlg); wEditEnd.text = job.end.toString(); wEditLyt.addWidget(wEditEnd);
+        
+        var wEditDlg = new DzBasicDialog(); 
+        wEditDlg.caption = "Scene Options";
+        wEditDlg.width = 400;
+        wEditDlg.height = 250;
+        
+        var wContainer = new DzWidget(wEditDlg);
+        var wLyt = new DzVBoxLayout(wContainer);
+        wLyt.margin = 0;
+        
+        var lblCam = new DzLabel(wContainer); 
+        lblCam.text = "Target Camera Name (Leave blank to use active):";
+        wLyt.addWidget(lblCam);
+        
+        var wEditCam = new DzLineEdit(wContainer); 
+        wEditCam.text = job.cam; 
+        wLyt.addWidget(wEditCam);
+        
+        var wEditChk = new DzCheckBox(wContainer); 
+        wEditChk.text = "Override Render Frames?"; 
+        wEditChk.checked = job.override; 
+        wLyt.addWidget(wEditChk);
+        
+        var lblStart = new DzLabel(wContainer); 
+        lblStart.text = "Start Frame:";
+        wLyt.addWidget(lblStart);
+        
+        var wEditStart = new DzLineEdit(wContainer); 
+        wEditStart.text = job.start.toString(); 
+        wLyt.addWidget(wEditStart);
+        
+        var lblEnd = new DzLabel(wContainer); 
+        lblEnd.text = "End Frame:";
+        wLyt.addWidget(lblEnd);
+        
+        var wEditEnd = new DzLineEdit(wContainer); 
+        wEditEnd.text = job.end.toString(); 
+        wLyt.addWidget(wEditEnd);
+        
+        wLyt.addStretch(1);
+        wEditDlg.addWidget(wContainer);
+        
+        function toggleFrames() {
+            var bIsChecked = wEditChk.checked;
+            lblStart.enabled = bIsChecked; 
+            wEditStart.enabled = bIsChecked;
+            lblEnd.enabled = bIsChecked; 
+            wEditEnd.enabled = bIsChecked;
+        }
+        wEditChk.toggled.connect(toggleFrames);
+        toggleFrames(); 
         
         if( wEditDlg.exec() ){
-            job.cam = wEditCam.text; job.override = wEditChk.checked; job.start = getInt(wEditStart, 0); job.end = getInt(wEditEnd, 0);
-            item.setText(0, job.path + getJobStatusStr(job)); syncState(); 
+            job.cam = wEditCam.text; 
+            job.override = wEditChk.checked; 
+            job.start = getInt(wEditStart, 0); 
+            job.end = getInt(wEditEnd, 0);
+            item.setText(0, job.path + getJobStatusStr(job)); 
+            syncState(); 
         }
     }
     wList.doubleClicked.connect( openEditDialog );
@@ -258,16 +319,18 @@
         print("--- RENDER QUEUE: Triggering Instant Memory Flush Restart ---");
         var oBat = new DzFile(sBatchFile); if(oBat.exists()) oBat.remove(); 
         if( oBat.open( DzFile.WriteOnly ) ){
-            var sAppWin = App.getApplicationPath().replace(/\//g, "\\") + "\\DAZStudio.exe";
             var sScriptWin = getScriptFileName().replace(/\//g, "\\");
             
             oBat.writeLine("@echo off");
+            oBat.writeLine("setlocal");
+            oBat.writeLine("echo Grabbing DAZ Studio path...");
+            oBat.writeLine("for /f \"delims=\" %%I in ('powershell -command \"(Get-Process DAZStudio).Path\"') do set \"DAZPATH=%%I\"");
             oBat.writeLine("echo Restarting DAZ Studio to clear VRAM leak...");
             oBat.writeLine(":loop");
             oBat.writeLine("tasklist | find /i \"DAZStudio.exe\" > nul");
             oBat.writeLine("if %errorlevel% equ 0 (timeout /t 1 > nul & goto loop)");
             oBat.writeLine("timeout /t 2 /nobreak > nul");
-            oBat.writeLine("start \"\" \"" + sAppWin + "\" \"" + sScriptWin + "\"");
+            oBat.writeLine("if defined DAZPATH (start \"\" \"%DAZPATH%\" \"" + sScriptWin + "\") else (start \"\" \"DAZStudio.exe\" \"" + sScriptWin + "\")");
             oBat.writeLine("exit");
             oBat.close(); 
             
@@ -279,6 +342,16 @@
     } 
 
     wBtnRun.clicked.connect(function(){
+        var sWorkingDir = wLineOut.text.replace(/\\/g, "/");
+        if( sWorkingDir.trim() === "" || sWorkingDir.trim() === "/" ) {
+            MessageBox.warning("Please specify a valid Render Output Directory.", "Missing Output Directory", "&OK");
+            return;
+        }
+        if( !sWorkingDir.endsWith("/") ) sWorkingDir += "/";
+        
+        var oDir = new DzDir(sWorkingDir);
+        if( !oDir.exists() ){ oDir.mkpath(sWorkingDir); }
+
         var oRenderMgr = App.getRenderMgr(); 
         var oContentMgr = App.getContentMgr();
         var nRestartLim = getInt(wLineRest, 0); 
@@ -315,8 +388,6 @@
             }
             
             if( bSceneReady ){
-                
-                // --- CAPTURE ORIGINAL STATE (Prevents overwriting the user's scene) ---
                 var oOpt = oRenderMgr.getRenderOptions();
                 var sOrigRenderImgFilename = oOpt.renderImgFilename;
                 var nOrigRenderImgToId = oOpt.renderImgToId;
@@ -342,7 +413,7 @@
                     if(bCancelQueue) { break; }
 
                     var sProgressText = "Rendering Scene " + (s+1) + "/" + aQueue.length + " (Frame " + (f+1) + "/" + nTotalFrames + ")";
-                    updateListRow(s, job.path + " [" + sProgressText + "]");
+                    updateListRow(s, job.path + "[" + sProgressText + "]");
                     print(sProgressText); 
 
                     var nAbsFrame = nStartFrame + f;
@@ -387,8 +458,6 @@
                     }
                 }
                 
-                // --- RESTORE ORIGINAL STATE ---
-                // This ensures the .duf file remains untouched.
                 oOpt.renderImgFilename = sOrigRenderImgFilename;
                 oOpt.renderImgToId = nOrigRenderImgToId;
                 oOpt.isCurrentFrameRender = bOrigIsCurrentFrameRender;
