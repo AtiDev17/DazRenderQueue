@@ -1,0 +1,423 @@
+(function(){
+
+    // --- 1. CONFIGURATION ---
+    var sWorkingDir = "C:/Users/YS/Pictures/test/"; 
+    var sStateFile  = sWorkingDir + "queue_state.json"; 
+    var sPathFile   = sWorkingDir + "last_path.txt"; 
+    var sBatchFile  = App.getTempPath() + "/restart_daz.bat";
+    
+    var oDir = new DzDir(sWorkingDir);
+    if( !oDir.exists() ){ oDir.mkpath(sWorkingDir); }
+
+    // --- 2. INTERNAL STATE ---
+    var aQueue =[];
+    var oState = {
+        sceneIdx: 0,
+        frameIdx: 0,     
+        restartLimit: 0, 
+        smoothWait: 3    
+    };
+    var nBatchCount = 0; 
+    var bRestartNeeded = false; 
+    var bCancelQueue = false;
+
+    // --- 3. HELPERS ---
+    function getInt( wWidget, nDef ){
+        try {
+            var n = parseInt( wWidget.text );
+            if( isNaN(n) ) return nDef;
+            return n;
+        } catch(e) { return nDef; }
+    }
+
+    function getItemIndex( listView, targetItem ) {
+        var current = listView.firstChild();
+        var idx = 0;
+        while( current ) {
+            if( current == targetItem ) return idx;
+            current = current.nextSibling();
+            idx++;
+        }
+        return -1;
+    }
+
+    function loadLastDir(){
+        var oFile = new DzFile(sPathFile);
+        if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
+            var sStoredPath = oFile.readLine().trim();
+            oFile.close();
+            if( sStoredPath != "" ){
+                var oTestDir = new DzDir(sStoredPath);
+                if( oTestDir.exists() ) return sStoredPath;
+            }
+        }
+        return sWorkingDir;
+    }
+
+    function saveLastDir( sPath ){
+        var oFile = new DzFile(sPathFile);
+        if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
+            oFile.writeLine( sPath );
+            oFile.close();
+        }
+    }
+
+    function getJobStatusStr(job) {
+        if(job.done) return " [DONE]";
+        return (job.override && (job.start !== job.end)) ? (" [Frames " + job.start + "-" + job.end + "]") : " [Single Frame]";
+    }
+
+    var sLastOpenDir = loadLastDir();
+    
+    // --- 4. UI SETUP ---
+    var wDlg = new DzDialog();
+    wDlg.caption = "Pro Render Queue Manager V2.4";
+    wDlg.width = 750; wDlg.height = 650;
+    var wLayout = new DzVBoxLayout(wDlg);
+
+    var lblInfo = new DzLabel(wDlg);
+    lblInfo.text = "Queue List (Double-Click an item to change Camera/Frames):";
+    wLayout.addWidget(lblInfo);
+
+    var wList = new DzListView(wDlg);
+    wList.addColumn("Queue Items"); 
+    wLayout.addWidget(wList);
+    
+    function refreshListUI() {
+        wList.clear();
+        for(var i=0; i<aQueue.length; i++) {
+            var wItem = new DzListViewItem(wList);
+            wItem.setText(0, aQueue[i].path + getJobStatusStr(aQueue[i]));
+        }
+    }
+
+    function updateListRow(idx, textStr) {
+        var curr = wList.firstChild();
+        for(var i=0; i<idx; i++){ if(curr) curr = curr.nextSibling(); }
+        if(curr) curr.setText(0, textStr);
+    }
+
+    var wTopBtnContainer = new DzWidget(wDlg);
+    var wTopBtnLayout = new DzGridLayout(wTopBtnContainer);
+    var wBtnAdd = new DzPushButton(wTopBtnContainer); wBtnAdd.text = "+ ADD SCENES / JSON"; wBtnAdd.minHeight = 40;
+    var wBtnRemove = new DzPushButton(wTopBtnContainer); wBtnRemove.text = "- REMOVE SELECTED"; wBtnRemove.minHeight = 40;
+    var wBtnExport = new DzPushButton(wTopBtnContainer); wBtnExport.text = "EXPORT SESSION"; wBtnExport.minHeight = 40;
+    
+    wTopBtnLayout.addWidget(wBtnAdd, 0, 0);
+    wTopBtnLayout.addWidget(wBtnRemove, 0, 1);
+    wTopBtnLayout.addWidget(wBtnExport, 0, 2);
+    wLayout.addWidget(wTopBtnContainer);
+    
+    var wGrpGlob = new DzGroupBox(wDlg);
+    wGrpGlob.title = "Global Execution Settings";
+    var wGlobLayout = new DzGridLayout(wGrpGlob); 
+    
+    var lblRest = new DzLabel(wGrpGlob); lblRest.text = "Restart Daz Every (X) Frames (0=Off):";
+    var wLineRest = new DzLineEdit(wGrpGlob); wLineRest.text = "0";
+    wGlobLayout.addWidget(lblRest, 0, 0); wGlobLayout.addWidget(wLineRest, 0, 1);
+
+    var lblWait = new DzLabel(wGrpGlob); lblWait.text = "Smoothing Wait (Seconds):";
+    var wLineWait = new DzLineEdit(wGrpGlob); wLineWait.text = "3";
+    wGlobLayout.addWidget(lblWait, 1, 0); wGlobLayout.addWidget(wLineWait, 1, 1);
+    wLayout.addWidget(wGrpGlob);
+    
+    var wActionContainer = new DzWidget(wDlg);
+    var wActionLayout = new DzGridLayout(wActionContainer);
+    var wBtnRun = new DzPushButton(wActionContainer); wBtnRun.text = "START RENDER QUEUE"; wBtnRun.minHeight = 50;
+    wBtnRun.styleSheet = "background-color: #2E7D32; color: white; font-weight: bold; font-size: 14px;";
+    
+    var wBtnCancel = new DzPushButton(wActionContainer); wBtnCancel.text = "STOP QUEUE"; wBtnCancel.minHeight = 50;
+    wBtnCancel.styleSheet = "background-color: #C62828; color: white; font-weight: bold; font-size: 14px;";
+    
+    var wBtnReset = new DzPushButton(wActionContainer); wBtnReset.text = "RESET QUEUE"; wBtnReset.minHeight = 50;
+
+    wActionLayout.addWidget(wBtnRun, 0, 0);
+    wActionLayout.addWidget(wBtnCancel, 0, 1);
+    wActionLayout.addWidget(wBtnReset, 0, 2);
+    wLayout.addWidget(wActionContainer);
+    
+    function syncState() {
+        if(aQueue.length === 0) {
+            var oFile = new DzFile(sStateFile); if(oFile.exists()) oFile.remove();
+            oState.sceneIdx = 0; oState.frameIdx = 0;
+        } else { saveState(oState.sceneIdx, oState.frameIdx); }
+    }
+    
+    wBtnReset.clicked.connect(function(){
+        if( MessageBox.question("Are you sure you want to clear the queue and reset all progress?", "Confirm Reset", "&Yes", "&No") == 0 ){
+            aQueue =[];
+            oState.sceneIdx = 0; oState.frameIdx = 0;
+            var oFile = new DzFile(sStateFile); if(oFile.exists()) oFile.remove();
+            refreshListUI();
+            wBtnRun.text = "START RENDER QUEUE";
+            print("--- RENDER QUEUE: Cleared and Reset ---");
+        }
+    });
+
+    wBtnCancel.clicked.connect(function(){
+        if( wBtnRun.enabled == false ) { 
+            bCancelQueue = true; wBtnCancel.text = "STOPPING...";
+            var oRenderMgr = App.getRenderMgr(); if (oRenderMgr.isRendering()) oRenderMgr.cancelRender();
+        }
+    });
+
+    wBtnRemove.clicked.connect(function(){
+        if( wBtnRun.enabled == false ) return; 
+        var wItem = wList.currentItem(); if(!wItem) return;
+        var idx = getItemIndex(wList, wItem);
+        if(idx > -1) { aQueue.splice(idx, 1); refreshListUI(); syncState(); }
+    });
+
+    wBtnExport.clicked.connect(function(){
+        if(aQueue.length === 0) return;
+        var sSavePath = FileDialog.doFileDialog(false, "Save Queue Session", sLastOpenDir, "JSON Queue (*.json)");
+        if(!sSavePath) return;
+        var oFile = new DzFile(sSavePath);
+        if(oFile.open(DzFile.WriteOnly | DzFile.Truncate)){
+            oState.restartLimit = getInt(wLineRest, 0); oState.smoothWait = getInt(wLineWait, 3);
+            var oData = { isNativeSession: true, queue: aQueue, state: oState };
+            oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
+        }
+    });
+
+    wBtnAdd.clicked.connect(function(){
+        sLastOpenDir = loadLastDir();
+        var aPaths = FileDialog.getOpenFileNames( sLastOpenDir, "Supported Files (*.duf *.json);;DAZ Scene (*.duf);;JSON Queue (*.json)", "Select Scenes or JSON" );
+        if( !aPaths || aPaths.length === 0 ) return;
+        var oFileInfo = new DzFileInfo(aPaths[0]); sLastOpenDir = oFileInfo.path(); saveLastDir(sLastOpenDir); 
+
+        for (var fIdx = 0; fIdx < aPaths.length; fIdx++) {
+            var sFile = aPaths[fIdx].replace(/\\/g, "/");
+            if( sFile.toLowerCase().endsWith(".json") ){
+                var oFile = new DzFile(sFile);
+                if( oFile.open( DzFile.ReadOnly ) ){
+                    try {
+                        var sData = oFile.read(); var parsedData = JSON.parse(sData);
+                        if(parsedData.isNativeSession) {
+                            aQueue = parsedData.queue; oState = parsedData.state;
+                            refreshListUI(); wLineRest.text = oState.restartLimit.toString(); wLineWait.text = oState.smoothWait.toString();
+                        } else {
+                            var tempArr = parsedData.scenes || (Array.isArray(parsedData) ? parsedData : [parsedData]);
+                            for(var i=0; i<tempArr.length; i++){
+                                var scn = tempArr[i]; var p = scn.file || scn.path || "";
+                                var c = (scn.sceneAttrs && scn.sceneAttrs.cameraCurrent) ? scn.sceneAttrs.cameraCurrent : (scn.cam || "");
+                                var startF = scn.singleFrame !== undefined ? scn.singleFrame : (scn.start || 0);
+                                var endF = scn.singleFrame !== undefined ? scn.singleFrame : (scn.end || 0);
+                                var isOver = scn.singleFrame !== undefined || scn.override || false;
+                                if( p != "" ) aQueue.push({ path: p, cam: c, override: isOver, start: startF, end: endF, done: false });
+                            }
+                        }
+                    } catch(e) {}
+                    oFile.close();
+                }
+            } else { aQueue.push({ path: sFile, cam: "", override: false, start: 0, end: 0, done: false }); }
+        }
+        refreshListUI(); syncState();
+    });
+    
+    function openEditDialog( item ) {
+        if( !item ) return;
+        var idx = getItemIndex( wList, item );
+        var job = aQueue[idx];
+        var wEditDlg = new DzBasicDialog(); wEditDlg.caption = "Scene Options";
+        var wEditLyt = new DzVBoxLayout(wEditDlg); 
+        var wEditCam = new DzLineEdit(wEditDlg); wEditCam.text = job.cam; wEditLyt.addWidget(wEditCam);
+        var wEditChk = new DzCheckBox(wEditDlg); wEditChk.text = "Override Frames?"; wEditChk.checked = job.override; wEditLyt.addWidget(wEditChk);
+        var wEditStart = new DzLineEdit(wEditDlg); wEditStart.text = job.start.toString(); wEditLyt.addWidget(wEditStart);
+        var wEditEnd = new DzLineEdit(wEditDlg); wEditEnd.text = job.end.toString(); wEditLyt.addWidget(wEditEnd);
+        
+        if( wEditDlg.exec() ){
+            job.cam = wEditCam.text; job.override = wEditChk.checked; job.start = getInt(wEditStart, 0); job.end = getInt(wEditEnd, 0);
+            item.setText(0, job.path + getJobStatusStr(job)); syncState(); 
+        }
+    }
+    wList.doubleClicked.connect( openEditDialog );
+    
+    function saveState( currentScene, currentFrameRel ){
+        oState.sceneIdx = currentScene; oState.frameIdx = currentFrameRel;
+        oState.restartLimit = getInt(wLineRest, 0); oState.smoothWait = getInt(wLineWait, 3);
+        var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
+            oFile.write( JSON.stringify({ queue: aQueue, state: oState }) ); oFile.close();
+        }
+    }
+
+    function loadState(){
+        var oFile = new DzFile(sStateFile);
+        if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
+            try {
+                var oData = JSON.parse( oFile.read() ); aQueue = oData.queue; oState = oData.state;
+                wLineRest.text = oState.restartLimit.toString(); wLineWait.text = oState.smoothWait.toString();
+                refreshListUI(); return true;
+            } catch(e){ }
+            oFile.close();
+        }
+        return false;
+    }
+
+    function triggerRestart(){
+        print("--- RENDER QUEUE: Triggering Instant Memory Flush Restart ---");
+        var oBat = new DzFile(sBatchFile); if(oBat.exists()) oBat.remove(); 
+        if( oBat.open( DzFile.WriteOnly ) ){
+            var sAppWin = App.getApplicationPath().replace(/\//g, "\\") + "\\DAZStudio.exe";
+            var sScriptWin = getScriptFileName().replace(/\//g, "\\");
+            
+            oBat.writeLine("@echo off");
+            oBat.writeLine("echo Restarting DAZ Studio to clear VRAM leak...");
+            oBat.writeLine(":loop");
+            oBat.writeLine("tasklist | find /i \"DAZStudio.exe\" > nul");
+            oBat.writeLine("if %errorlevel% equ 0 (timeout /t 1 > nul & goto loop)");
+            oBat.writeLine("timeout /t 2 /nobreak > nul");
+            oBat.writeLine("start \"\" \"" + sAppWin + "\" \"" + sScriptWin + "\"");
+            oBat.writeLine("exit");
+            oBat.close(); 
+            
+            bRestartNeeded = true;
+            Scene.clear();
+            App.processEvents();
+            wDlg.accept(); 
+        }
+    } 
+
+    wBtnRun.clicked.connect(function(){
+        var oRenderMgr = App.getRenderMgr(); 
+        var oContentMgr = App.getContentMgr();
+        var nRestartLim = getInt(wLineRest, 0); 
+        var nWaitMs = getInt(wLineWait, 3) * 1000;
+        
+        bCancelQueue = false; 
+        wBtnRun.enabled = false; 
+        wBtnRun.text = "RENDERING...";
+
+        for( var s = oState.sceneIdx; s < aQueue.length; s++ ){
+            if(bCancelQueue) { break; }
+            
+            var job = aQueue[s]; 
+            if(job.done) continue; 
+            
+            if( nRestartLim > 0 && nBatchCount >= nRestartLim ){
+                saveState( s, 0 ); triggerRestart(); return; 
+            }
+
+            var sCurrentFile = Scene.getFilename().replace(/\\/g, "/");
+            var sTargetFile = job.path.replace(/\\/g, "/");
+            var bSceneReady = false;
+
+            if (sCurrentFile == sTargetFile) {
+                bSceneReady = true;
+            } else {
+                updateListRow(s, job.path + " [LOADING...]");
+                Scene.clear();
+                if( oContentMgr.openNativeFile( job.path, false ) ) {
+                    bSceneReady = true;
+                } else {
+                    print("--- ERROR: Failed to load scene file: " + job.path);
+                }
+            }
+            
+            if( bSceneReady ){
+                
+                // --- CAPTURE ORIGINAL STATE (Prevents overwriting the user's scene) ---
+                var oOpt = oRenderMgr.getRenderOptions();
+                var sOrigRenderImgFilename = oOpt.renderImgFilename;
+                var nOrigRenderImgToId = oOpt.renderImgToId;
+                var bOrigIsCurrentFrameRender = oOpt.isCurrentFrameRender;
+                var nOrigTime = Scene.getTime();
+                var oActiveCam = MainWindow.getViewportMgr().getActiveViewport().get3DViewport().getCamera();
+
+                if( job.cam != "" ){
+                    var oCamNode = Scene.findNodeByLabel(job.cam);
+                    if(oCamNode) {
+                        MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(oCamNode);
+                    } else {
+                        print("--- WARNING: Camera '" + job.cam + "' not found in scene '" + job.path + "'. Using active camera.");
+                    }
+                }
+
+                var nTick = Scene.getTimeStep();
+                var nStartFrame = job.override ? job.start : (Scene.getTime() / nTick);
+                var nEndFrame = job.override ? job.end : nStartFrame;
+                var nTotalFrames = (nEndFrame - nStartFrame) + 1;
+                
+                for( var f = oState.frameIdx; f < nTotalFrames; f++ ){
+                    if(bCancelQueue) { break; }
+
+                    var sProgressText = "Rendering Scene " + (s+1) + "/" + aQueue.length + " (Frame " + (f+1) + "/" + nTotalFrames + ")";
+                    updateListRow(s, job.path + " [" + sProgressText + "]");
+                    print(sProgressText); 
+
+                    var nAbsFrame = nStartFrame + f;
+                    var sSceneName = job.path.substring( job.path.lastIndexOf("/")+1, job.path.lastIndexOf(".") );
+                    var sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sSceneName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + ".png");
+                    
+                    if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
+                    
+                    var oCheckFile = new DzFileInfo(sOutFile);
+                    if (oCheckFile.exists() && oCheckFile.size() > 0) { 
+                        print("- SKIP (File Exists): Frame " + nAbsFrame); 
+                        nBatchCount++;
+                        continue; 
+                    }
+
+                    Scene.setTime( nAbsFrame * nTick ); Scene.update();
+
+                    var nStartWait = new Date().getTime();
+                    while( (new Date().getTime() - nStartWait) < nWaitMs ){ 
+                        processEvents(); 
+                        if(bCancelQueue) break; 
+                    }
+                    if(bCancelQueue) { saveState(s, f); break; }
+
+                    oOpt.renderImgToId = DzRenderOptions.DirectToFile;
+                    oOpt.renderImgFilename = sOutFile;
+                    oOpt.isCurrentFrameRender = true; 
+                    
+                    oRenderMgr.doRender(oOpt); 
+                    while( oRenderMgr.isRendering() ){ 
+                        processEvents(); 
+                        sleep(500); 
+                    }
+                    if(bCancelQueue) { saveState(s, f); break; }
+                    
+                    nBatchCount++;
+                    
+                    if( nRestartLim > 0 && nBatchCount >= nRestartLim ){
+                        var nextF = f + 1; var nextS = s;
+                        if(nextF >= nTotalFrames) { nextF = 0; nextS = s + 1; }
+                        saveState( nextS, nextF ); triggerRestart(); return; 
+                    }
+                }
+                
+                // --- RESTORE ORIGINAL STATE ---
+                // This ensures the .duf file remains untouched.
+                oOpt.renderImgFilename = sOrigRenderImgFilename;
+                oOpt.renderImgToId = nOrigRenderImgToId;
+                oOpt.isCurrentFrameRender = bOrigIsCurrentFrameRender;
+                Scene.setTime( nOrigTime ); 
+                if(oActiveCam) {
+                    MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(oActiveCam);
+                }
+                Scene.update();
+                
+                if(bCancelQueue) break;
+                oState.frameIdx = 0; job.done = true; updateListRow(s, job.path + " [DONE]"); syncState(); 
+            } else { 
+                updateListRow(s, job.path + " [ERROR - FAILED TO LOAD]"); 
+            }
+        }
+        
+        wBtnRun.enabled = true; wBtnRun.text = "START RENDER QUEUE"; wBtnCancel.text = "STOP QUEUE";
+        if(!bCancelQueue) { 
+            var oFile = new DzFile(sStateFile); if(oFile.exists()) oFile.remove(); 
+            MessageBox.information("Render queue complete!", "Success", "&OK"); 
+        }
+    });
+
+    if( loadState() ) wBtnRun.text = (oState.sceneIdx >= aQueue.length) ? "START RENDER QUEUE" : "RESUME (Scene " + (oState.sceneIdx+1) + ")";
+    wDlg.exec();
+
+    if( bRestartNeeded ){
+        var sWinBat = sBatchFile.replace(/\//g, "\\");
+        var oProc = new DzProcess(); oProc.start("cmd",["/c", "start", "", sWinBat]);
+        sleep(1000); Scene.clear(); App.quit();
+    }
+})();
