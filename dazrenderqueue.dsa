@@ -1,17 +1,13 @@
 (function(){
 
     var sStateFile  = App.getTempPath() + "/queue_state.json"; 
-    var sBatchFile  = App.getTempPath() + "/restart_daz.bat";
 
     var aQueue =[];
     var oState = {
         sceneIdx: 0,
         frameIdx: 0,     
-        restartLimit: 0, 
         smoothWait: 3    
     };
-    var nBatchCount = 0; 
-    var bRestartNeeded = false; 
     var bCancelQueue = false;
 
     function getInt( wWidget, nDef ){
@@ -51,7 +47,7 @@
     var sLastOpenDir = loadLastDir();
     
     var wDlg = new DzDialog();
-    wDlg.caption = "Pro Render Queue Manager V2.6";
+    wDlg.caption = "Pro Render Queue Manager V2.7";
     wDlg.width = 750; wDlg.height = 650;
     var wLayout = new DzVBoxLayout(wDlg);
 
@@ -123,14 +119,10 @@
     var wGrpGlob = new DzGroupBox(wDlg);
     wGrpGlob.title = "Global Execution Settings";
     var wGlobLayout = new DzGridLayout(wGrpGlob); 
-    
-    var lblRest = new DzLabel(wGrpGlob); lblRest.text = "Restart Daz Every (X) Frames (0=Off):";
-    var wLineRest = new DzLineEdit(wGrpGlob); wLineRest.text = "0";
-    wGlobLayout.addWidget(lblRest, 0, 0); wGlobLayout.addWidget(wLineRest, 0, 1);
 
     var lblWait = new DzLabel(wGrpGlob); lblWait.text = "Smoothing Wait (Seconds):";
     var wLineWait = new DzLineEdit(wGrpGlob); wLineWait.text = "3";
-    wGlobLayout.addWidget(lblWait, 1, 0); wGlobLayout.addWidget(wLineWait, 1, 1);
+    wGlobLayout.addWidget(lblWait, 0, 0); wGlobLayout.addWidget(wLineWait, 0, 1);
     wLayout.addWidget(wGrpGlob);
     
     var wActionContainer = new DzWidget(wDlg);
@@ -186,7 +178,7 @@
         if(!sSavePath) return;
         var oFile = new DzFile(sSavePath);
         if(oFile.open(DzFile.WriteOnly | DzFile.Truncate)){
-            oState.restartLimit = getInt(wLineRest, 0); oState.smoothWait = getInt(wLineWait, 3);
+            oState.smoothWait = getInt(wLineWait, 3);
             var oData = { isNativeSession: true, queue: aQueue, state: oState };
             oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
         }
@@ -207,7 +199,7 @@
                         var sData = oFile.read(); var parsedData = JSON.parse(sData);
                         if(parsedData.isNativeSession) {
                             aQueue = parsedData.queue; oState = parsedData.state;
-                            refreshListUI(); wLineRest.text = oState.restartLimit.toString(); wLineWait.text = oState.smoothWait.toString();
+                            refreshListUI(); wLineWait.text = oState.smoothWait.toString();
                         } else {
                             var tempArr = parsedData.scenes || (Array.isArray(parsedData) ? parsedData : [parsedData]);
                             for(var i=0; i<tempArr.length; i++){
@@ -296,7 +288,7 @@
     
     function saveState( currentScene, currentFrameRel ){
         oState.sceneIdx = currentScene; oState.frameIdx = currentFrameRel;
-        oState.restartLimit = getInt(wLineRest, 0); oState.smoothWait = getInt(wLineWait, 3);
+        oState.smoothWait = getInt(wLineWait, 3);
         var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
             oFile.write( JSON.stringify({ queue: aQueue, state: oState }) ); oFile.close();
         }
@@ -307,39 +299,13 @@
         if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
             try {
                 var oData = JSON.parse( oFile.read() ); aQueue = oData.queue; oState = oData.state;
-                wLineRest.text = oState.restartLimit.toString(); wLineWait.text = oState.smoothWait.toString();
+                wLineWait.text = oState.smoothWait.toString();
                 refreshListUI(); return true;
             } catch(e){ }
             oFile.close();
         }
         return false;
     }
-
-    function triggerRestart(){
-        print("--- RENDER QUEUE: Triggering Instant Memory Flush Restart ---");
-        var oBat = new DzFile(sBatchFile); if(oBat.exists()) oBat.remove(); 
-        if( oBat.open( DzFile.WriteOnly ) ){
-            var sScriptWin = getScriptFileName().replace(/\//g, "\\");
-            
-            oBat.writeLine("@echo off");
-            oBat.writeLine("setlocal");
-            oBat.writeLine("echo Grabbing DAZ Studio path...");
-            oBat.writeLine("for /f \"delims=\" %%I in ('powershell -command \"(Get-Process DAZStudio).Path\"') do set \"DAZPATH=%%I\"");
-            oBat.writeLine("echo Restarting DAZ Studio to clear VRAM leak...");
-            oBat.writeLine(":loop");
-            oBat.writeLine("tasklist | find /i \"DAZStudio.exe\" > nul");
-            oBat.writeLine("if %errorlevel% equ 0 (timeout /t 1 > nul & goto loop)");
-            oBat.writeLine("timeout /t 2 /nobreak > nul");
-            oBat.writeLine("if defined DAZPATH (start \"\" \"%DAZPATH%\" \"" + sScriptWin + "\") else (start \"\" \"DAZStudio.exe\" \"" + sScriptWin + "\")");
-            oBat.writeLine("exit");
-            oBat.close(); 
-            
-            bRestartNeeded = true;
-            Scene.clear();
-            App.processEvents();
-            wDlg.accept(); 
-        }
-    } 
 
     wBtnRun.clicked.connect(function(){
         var sWorkingDir = wLineOut.text.replace(/\\/g, "/");
@@ -354,7 +320,6 @@
 
         var oRenderMgr = App.getRenderMgr(); 
         var oContentMgr = App.getContentMgr();
-        var nRestartLim = getInt(wLineRest, 0); 
         var nWaitMs = getInt(wLineWait, 3) * 1000;
         
         bCancelQueue = false; 
@@ -366,10 +331,6 @@
             
             var job = aQueue[s]; 
             if(job.done) continue; 
-            
-            if( nRestartLim > 0 && nBatchCount >= nRestartLim ){
-                saveState( s, 0 ); triggerRestart(); return; 
-            }
 
             var sCurrentFile = Scene.getFilename().replace(/\\/g, "/");
             var sTargetFile = job.path.replace(/\\/g, "/");
@@ -413,7 +374,7 @@
                     if(bCancelQueue) { break; }
 
                     var sProgressText = "Rendering Scene " + (s+1) + "/" + aQueue.length + " (Frame " + (f+1) + "/" + nTotalFrames + ")";
-                    updateListRow(s, job.path + "[" + sProgressText + "]");
+                    updateListRow(s, job.path + " [" + sProgressText + "]");
                     print(sProgressText); 
 
                     var nAbsFrame = nStartFrame + f;
@@ -425,7 +386,6 @@
                     var oCheckFile = new DzFileInfo(sOutFile);
                     if (oCheckFile.exists() && oCheckFile.size() > 0) { 
                         print("- SKIP (File Exists): Frame " + nAbsFrame); 
-                        nBatchCount++;
                         continue; 
                     }
 
@@ -448,14 +408,6 @@
                         sleep(500); 
                     }
                     if(bCancelQueue) { saveState(s, f); break; }
-                    
-                    nBatchCount++;
-                    
-                    if( nRestartLim > 0 && nBatchCount >= nRestartLim ){
-                        var nextF = f + 1; var nextS = s;
-                        if(nextF >= nTotalFrames) { nextF = 0; nextS = s + 1; }
-                        saveState( nextS, nextF ); triggerRestart(); return; 
-                    }
                 }
                 
                 oOpt.renderImgFilename = sOrigRenderImgFilename;
@@ -470,7 +422,7 @@
                 if(bCancelQueue) break;
                 oState.frameIdx = 0; job.done = true; updateListRow(s, job.path + " [DONE]"); syncState(); 
             } else { 
-                updateListRow(s, job.path + " [ERROR - FAILED TO LOAD]"); 
+                updateListRow(s, job.path + "[ERROR - FAILED TO LOAD]"); 
             }
         }
         
@@ -484,9 +436,4 @@
     if( loadState() ) wBtnRun.text = (oState.sceneIdx >= aQueue.length) ? "START RENDER QUEUE" : "RESUME (Scene " + (oState.sceneIdx+1) + ")";
     wDlg.exec();
 
-    if( bRestartNeeded ){
-        var sWinBat = sBatchFile.replace(/\//g, "\\");
-        var oProc = new DzProcess(); oProc.start("cmd",["/c", "start", "", sWinBat]);
-        sleep(1000); Scene.clear(); App.quit();
-    }
 })();
