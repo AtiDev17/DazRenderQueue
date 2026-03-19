@@ -48,7 +48,7 @@
     var sLastOpenDir = loadLastDir();
     
     var wDlg = new DzDialog();
-    wDlg.caption = "Pro Render Queue Manager V2.8";
+    wDlg.caption = "Render Queue";
     wDlg.width = 750; wDlg.height = 650;
     var wLayout = new DzVBoxLayout(wDlg);
 
