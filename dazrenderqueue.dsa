@@ -6,7 +6,8 @@
     var oState = {
         sceneIdx: 0,
         frameIdx: 0,     
-        smoothWait: 3    
+        smoothWait: 3,
+        shutdown: false
     };
     var bCancelQueue = false;
 
@@ -123,6 +124,11 @@
     var lblWait = new DzLabel(wGrpGlob); lblWait.text = "Smoothing Wait (Seconds):";
     var wLineWait = new DzLineEdit(wGrpGlob); wLineWait.text = "3";
     wGlobLayout.addWidget(lblWait, 0, 0); wGlobLayout.addWidget(wLineWait, 0, 1);
+    
+    var wChkShutdown = new DzCheckBox(wGrpGlob);
+    wChkShutdown.text = "Shutdown PC when queue finishes";
+    wGlobLayout.addWidget(wChkShutdown, 1, 0, 1, 2); 
+    
     wLayout.addWidget(wGrpGlob);
     
     var wActionContainer = new DzWidget(wDlg);
@@ -179,6 +185,7 @@
         var oFile = new DzFile(sSavePath);
         if(oFile.open(DzFile.WriteOnly | DzFile.Truncate)){
             oState.smoothWait = getInt(wLineWait, 3);
+            oState.shutdown = wChkShutdown.checked;
             var oData = { isNativeSession: true, queue: aQueue, state: oState };
             oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
         }
@@ -200,6 +207,7 @@
                         if(parsedData.isNativeSession) {
                             aQueue = parsedData.queue; oState = parsedData.state;
                             refreshListUI(); wLineWait.text = oState.smoothWait.toString();
+                            wChkShutdown.checked = oState.shutdown || false;
                         } else {
                             var tempArr = parsedData.scenes || (Array.isArray(parsedData) ? parsedData : [parsedData]);
                             for(var i=0; i<tempArr.length; i++){
@@ -289,6 +297,7 @@
     function saveState( currentScene, currentFrameRel ){
         oState.sceneIdx = currentScene; oState.frameIdx = currentFrameRel;
         oState.smoothWait = getInt(wLineWait, 3);
+        oState.shutdown = wChkShutdown.checked;
         var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
             oFile.write( JSON.stringify({ queue: aQueue, state: oState }) ); oFile.close();
         }
@@ -300,6 +309,7 @@
             try {
                 var oData = JSON.parse( oFile.read() ); aQueue = oData.queue; oState = oData.state;
                 wLineWait.text = oState.smoothWait.toString();
+                wChkShutdown.checked = oState.shutdown || false;
                 refreshListUI(); return true;
             } catch(e){ }
             oFile.close();
@@ -427,9 +437,17 @@
         }
         
         wBtnRun.enabled = true; wBtnRun.text = "START RENDER QUEUE"; wBtnCancel.text = "STOP QUEUE";
+        
         if(!bCancelQueue) { 
             var oFile = new DzFile(sStateFile); if(oFile.exists()) oFile.remove(); 
-            MessageBox.information("Render queue complete!", "Success", "&OK"); 
+            
+            if (wChkShutdown.checked) {
+                var aArgs = ["cmd", "/c", "shutdown", "/s", "/t", "5"];
+                var oProc = new DzProcess(aArgs); 
+                oProc.start(); 
+            } else {
+                MessageBox.information("Render queue complete!", "Success", "&OK"); 
+            }
         }
     });
 
