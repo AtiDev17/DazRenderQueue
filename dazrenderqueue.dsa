@@ -42,13 +42,13 @@
 
     function getJobStatusStr(job) {
         if(job.done) return " [DONE]";
-        return (job.override && (job.start !== job.end)) ? ("[Frames " + job.start + "-" + job.end + "]") : " [Single Frame]";
+        return job.override ? " [Animation]" : " [Current Frame]";
     }
 
     var sLastOpenDir = loadLastDir();
     
     var wDlg = new DzDialog();
-    wDlg.caption = "Pro Render Queue Manager V2.7";
+    wDlg.caption = "Pro Render Queue Manager V2.8";
     wDlg.width = 750; wDlg.height = 650;
     var wLayout = new DzVBoxLayout(wDlg);
 
@@ -213,16 +213,14 @@
                             for(var i=0; i<tempArr.length; i++){
                                 var scn = tempArr[i]; var p = scn.file || scn.path || "";
                                 var c = (scn.sceneAttrs && scn.sceneAttrs.cameraCurrent) ? scn.sceneAttrs.cameraCurrent : (scn.cam || "");
-                                var startF = scn.singleFrame !== undefined ? scn.singleFrame : (scn.start || 0);
-                                var endF = scn.singleFrame !== undefined ? scn.singleFrame : (scn.end || 0);
-                                var isOver = scn.singleFrame !== undefined || scn.override || false;
-                                if( p != "" ) aQueue.push({ path: p, cam: c, override: isOver, start: startF, end: endF, done: false });
+                                var isOver = scn.override || false;
+                                if( p != "" ) aQueue.push({ path: p, cam: c, override: isOver, done: false });
                             }
                         }
                     } catch(e) {}
                     oFile.close();
                 }
-            } else { aQueue.push({ path: sFile, cam: "", override: false, start: 0, end: 0, done: false }); }
+            } else { aQueue.push({ path: sFile, cam: "", override: false, done: false }); }
         }
         refreshListUI(); syncState();
     });
@@ -235,59 +233,43 @@
         var wEditDlg = new DzBasicDialog(); 
         wEditDlg.caption = "Scene Options";
         wEditDlg.width = 400;
-        wEditDlg.height = 250;
+        wEditDlg.height = 150;
         
         var wContainer = new DzWidget(wEditDlg);
         var wLyt = new DzVBoxLayout(wContainer);
         wLyt.margin = 0;
         
+        var sCamHelp = "<b>Target Camera Options</b><br><br>" +
+                       "• <b>Leave Blank:</b> Renders the saved active camera.<br>" +
+                       "• <b>Enter Name:</b> Renders a specific camera by name.<br>" +
+                       "• <b>Type 'ALL':</b> Renders every custom camera in the scene.";
+                       
+        var sFrameHelp = "<b>Render Saved Animation Range?</b><br><br>" +
+                         "• <b>Unchecked:</b> Renders only the single frame currently active on the timeline.<br>" +
+                         "• <b>Checked:</b> Renders the full animation sequence based on the scene's Render Settings.";
+        
         var lblCam = new DzLabel(wContainer); 
-        lblCam.text = "Target Camera Name (Leave blank to use active):";
+        lblCam.text = "Target Camera Name:";
+        lblCam.whatsThis = sCamHelp;
         wLyt.addWidget(lblCam);
         
         var wEditCam = new DzLineEdit(wContainer); 
         wEditCam.text = job.cam; 
+        wEditCam.whatsThis = sCamHelp;
         wLyt.addWidget(wEditCam);
         
         var wEditChk = new DzCheckBox(wContainer); 
-        wEditChk.text = "Override Render Frames?"; 
+        wEditChk.text = "Render Saved Animation Range?"; 
+        wEditChk.whatsThis = sFrameHelp;
         wEditChk.checked = job.override; 
         wLyt.addWidget(wEditChk);
-        
-        var lblStart = new DzLabel(wContainer); 
-        lblStart.text = "Start Frame:";
-        wLyt.addWidget(lblStart);
-        
-        var wEditStart = new DzLineEdit(wContainer); 
-        wEditStart.text = job.start.toString(); 
-        wLyt.addWidget(wEditStart);
-        
-        var lblEnd = new DzLabel(wContainer); 
-        lblEnd.text = "End Frame:";
-        wLyt.addWidget(lblEnd);
-        
-        var wEditEnd = new DzLineEdit(wContainer); 
-        wEditEnd.text = job.end.toString(); 
-        wLyt.addWidget(wEditEnd);
         
         wLyt.addStretch(1);
         wEditDlg.addWidget(wContainer);
         
-        function toggleFrames() {
-            var bIsChecked = wEditChk.checked;
-            lblStart.enabled = bIsChecked; 
-            wEditStart.enabled = bIsChecked;
-            lblEnd.enabled = bIsChecked; 
-            wEditEnd.enabled = bIsChecked;
-        }
-        wEditChk.toggled.connect(toggleFrames);
-        toggleFrames(); 
-        
         if( wEditDlg.exec() ){
             job.cam = wEditCam.text; 
             job.override = wEditChk.checked; 
-            job.start = getInt(wEditStart, 0); 
-            job.end = getInt(wEditEnd, 0);
             item.setText(0, job.path + getJobStatusStr(job)); 
             syncState(); 
         }
@@ -366,39 +348,45 @@
                 var nOrigTime = Scene.getTime();
                 var oActiveCam = MainWindow.getViewportMgr().getActiveViewport().get3DViewport().getCamera();
 
-                if( job.cam != "" ){
+                var aCamsToRender = [];
+                if( job.cam.toUpperCase() === "ALL" ) {
+                    var allCams = Scene.getCameraList();
+                    var aDefaultCams = ["Perspective View", "Front View", "Left View", "Right View", "Top View", "Bottom View", "Back View"];
+                    for (var cIdx=0; cIdx < allCams.length; cIdx++) {
+                        if(aDefaultCams.indexOf(allCams[cIdx].name) === -1) {
+                            aCamsToRender.push(allCams[cIdx]);
+                        }
+                    }
+                    if(aCamsToRender.length === 0 && oActiveCam) aCamsToRender.push(oActiveCam);
+                } else if( job.cam != "" ){
                     var oCamNode = Scene.findNodeByLabel(job.cam);
                     if(oCamNode) {
-                        MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(oCamNode);
+                        aCamsToRender.push(oCamNode);
                     } else {
-                        print("--- WARNING: Camera '" + job.cam + "' not found in scene '" + job.path + "'. Using active camera.");
+                        if(oActiveCam) aCamsToRender.push(oActiveCam);
                     }
+                } else {
+                    if(oActiveCam) aCamsToRender.push(oActiveCam);
                 }
 
                 var nTick = Scene.getTimeStep();
-                var nStartFrame = job.override ? job.start : (Scene.getTime() / nTick);
-                var nEndFrame = job.override ? job.end : nStartFrame;
+                var nStartFrame = 0;
+                var nEndFrame = 0;
+                
+                if (job.override) {
+                    nStartFrame = oOpt.startTime / nTick;
+                    nEndFrame = oOpt.endTime / nTick;
+                } else {
+                    nStartFrame = Scene.getTime() / nTick;
+                    nEndFrame = nStartFrame;
+                }
+
                 var nTotalFrames = (nEndFrame - nStartFrame) + 1;
                 
                 for( var f = oState.frameIdx; f < nTotalFrames; f++ ){
                     if(bCancelQueue) { break; }
 
-                    var sProgressText = "Rendering Scene " + (s+1) + "/" + aQueue.length + " (Frame " + (f+1) + "/" + nTotalFrames + ")";
-                    updateListRow(s, job.path + " [" + sProgressText + "]");
-                    print(sProgressText); 
-
                     var nAbsFrame = nStartFrame + f;
-                    var sSceneName = job.path.substring( job.path.lastIndexOf("/")+1, job.path.lastIndexOf(".") );
-                    var sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sSceneName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + ".png");
-                    
-                    if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
-                    
-                    var oCheckFile = new DzFileInfo(sOutFile);
-                    if (oCheckFile.exists() && oCheckFile.size() > 0) { 
-                        print("- SKIP (File Exists): Frame " + nAbsFrame); 
-                        continue; 
-                    }
-
                     Scene.setTime( nAbsFrame * nTick ); Scene.update();
 
                     var nStartWait = new Date().getTime();
@@ -408,14 +396,41 @@
                     }
                     if(bCancelQueue) { saveState(s, f); break; }
 
-                    oOpt.renderImgToId = DzRenderOptions.DirectToFile;
-                    oOpt.renderImgFilename = sOutFile;
-                    oOpt.isCurrentFrameRender = true; 
-                    
-                    oRenderMgr.doRender(oOpt); 
-                    while( oRenderMgr.isRendering() ){ 
-                        processEvents(); 
-                        sleep(500); 
+                    for( var c = 0; c < aCamsToRender.length; c++ ) {
+                        var currentCam = aCamsToRender[c];
+                        MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(currentCam);
+
+                        var sCamSafeName = currentCam.name.replace(/[^a-z0-9_-]/gi, '_');
+                        var sProgressText = "Scene " + (s+1) + "/" + aQueue.length + " (F: " + (f+1) + "/" + nTotalFrames + ") [Cam: " + currentCam.name + "]";
+                        updateListRow(s, job.path + " [" + sProgressText + "]");
+                        print(sProgressText); 
+
+                        var sSceneName = job.path.substring( job.path.lastIndexOf("/")+1, job.path.lastIndexOf(".") );
+                        var sOutFile = "";
+
+                        if (job.cam.toUpperCase() === "ALL" && aCamsToRender.length > 1) {
+                            sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sCamSafeName + "/" + sSceneName + "_" + sCamSafeName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + "_" + sCamSafeName + ".png");
+                            if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/" + sCamSafeName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
+                        } else {
+                            sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sSceneName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + ".png");
+                            if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
+                        }
+                        
+                        var oCheckFile = new DzFileInfo(sOutFile);
+                        if (oCheckFile.exists() && oCheckFile.size() > 0) { 
+                            continue; 
+                        }
+
+                        oOpt.renderImgToId = DzRenderOptions.DirectToFile;
+                        oOpt.renderImgFilename = sOutFile;
+                        oOpt.isCurrentFrameRender = true; 
+                        
+                        oRenderMgr.doRender(oOpt); 
+                        while( oRenderMgr.isRendering() ){ 
+                            processEvents(); 
+                            sleep(500); 
+                        }
+                        if(bCancelQueue) break; 
                     }
                     if(bCancelQueue) { saveState(s, f); break; }
                 }
