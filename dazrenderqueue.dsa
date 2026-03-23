@@ -373,13 +373,16 @@
                 var nStartFrame = 0;
                 var nEndFrame = 0;
                 
-                if (job.override) {
-                    nStartFrame = oOpt.startTime / nTick;
-                    nEndFrame = oOpt.endTime / nTick;
-                } else {
-                    nStartFrame = Scene.getTime() / nTick;
-                    nEndFrame = nStartFrame;
-                }
+				var oPlayRange = Scene.getPlayRange();
+
+				if (job.override) {
+				// Math.round fixes the floating point tick-division errors
+					nStartFrame = Math.round(oPlayRange.start / nTick);
+					nEndFrame = Math.round(oPlayRange.end / nTick);
+				} else {
+					nStartFrame = Math.round(Scene.getTime() / nTick);
+					nEndFrame = nStartFrame;
+				}
 
                 var nTotalFrames = (nEndFrame - nStartFrame) + 1;
                 
