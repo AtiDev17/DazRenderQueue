@@ -1,5 +1,4 @@
 (function(){
-
     var sStateFile  = App.getTempPath() + "/queue_state.json"; 
 
     var aQueue =[];
@@ -19,15 +18,10 @@
         } catch(e) { return nDef; }
     }
 
-    function getItemIndex( listView, targetItem ) {
-        var current = listView.firstChild();
-        var idx = 0;
-        while( current ) {
-            if( current == targetItem ) return idx;
-            current = current.nextSibling();
-            idx++;
-        }
-        return -1;
+    function getItemIndex( targetItem ) {
+        if(!targetItem) return -1;
+        var idx = parseInt(targetItem.text(1));
+        return isNaN(idx) ? -1 : idx;
     }
 
     function loadLastDir(){
@@ -90,6 +84,10 @@
 
     var wList = new DzListView(wDlg);
     wList.addColumn("Queue Items"); 
+    wList.addColumn("ID"); 
+    wList.setColumnWidth(0, 700); 
+    wList.setColumnWidth(1, 0); 
+    wList.allColumnsShowFocus = true;
     wLayout.addWidget(wList);
     
     function refreshListUI() {
@@ -97,13 +95,19 @@
         for(var i=0; i<aQueue.length; i++) {
             var wItem = new DzListViewItem(wList);
             wItem.setText(0, aQueue[i].path + getJobStatusStr(aQueue[i]));
+            wItem.setText(1, i.toString()); 
         }
     }
 
     function updateListRow(idx, textStr) {
         var curr = wList.firstChild();
-        for(var i=0; i<idx; i++){ if(curr) curr = curr.nextSibling(); }
-        if(curr) curr.setText(0, textStr);
+        while(curr) {
+            if(parseInt(curr.text(1)) === idx) {
+                curr.setText(0, textStr);
+                return;
+            }
+            curr = curr.nextSibling();
+        }
     }
 
     var wTopBtnContainer = new DzWidget(wDlg);
@@ -174,7 +178,7 @@
     wBtnRemove.clicked.connect(function(){
         if( wBtnRun.enabled == false ) return; 
         var wItem = wList.currentItem(); if(!wItem) return;
-        var idx = getItemIndex(wList, wItem);
+        var idx = getItemIndex(wItem);
         if(idx > -1) { aQueue.splice(idx, 1); refreshListUI(); syncState(); }
     });
 
@@ -227,7 +231,8 @@
     
     function openEditDialog( item ) {
         if( !item ) return;
-        var idx = getItemIndex( wList, item );
+        var idx = getItemIndex( item );
+        if(idx === -1) return;
         var job = aQueue[idx];
         
         var wEditDlg = new DzBasicDialog(); 
@@ -288,13 +293,20 @@
     function loadState(){
         var oFile = new DzFile(sStateFile);
         if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
+            var bSuccess = false;
             try {
-                var oData = JSON.parse( oFile.read() ); aQueue = oData.queue; oState = oData.state;
+                var oData = JSON.parse( oFile.read() ); 
+                aQueue = oData.queue; 
+                oState = oData.state;
                 wLineWait.text = oState.smoothWait.toString();
                 wChkShutdown.checked = oState.shutdown || false;
-                refreshListUI(); return true;
-            } catch(e){ }
+                refreshListUI(); 
+                bSuccess = true;
+            } catch(e) { 
+                print("Error parsing queue state: " + e);
+            }
             oFile.close();
+            return bSuccess;
         }
         return false;
     }
@@ -313,6 +325,13 @@
         var oRenderMgr = App.getRenderMgr(); 
         var oContentMgr = App.getContentMgr();
         var nWaitMs = getInt(wLineWait, 3) * 1000;
+        
+        // Listener to catch native DAZ render cancelation
+        var bNativeRenderSuccess = true;
+        var onRenderFinish = function( bSuccess ) {
+            bNativeRenderSuccess = bSuccess;
+        };
+        oRenderMgr.renderFinished.connect( onRenderFinish );
         
         bCancelQueue = false; 
         wBtnRun.enabled = false; 
@@ -373,16 +392,15 @@
                 var nStartFrame = 0;
                 var nEndFrame = 0;
                 
-				var oPlayRange = Scene.getPlayRange();
+                var oPlayRange = Scene.getPlayRange();
 
-				if (job.override) {
-				// Math.round fixes the floating point tick-division errors
-					nStartFrame = Math.round(oPlayRange.start / nTick);
-					nEndFrame = Math.round(oPlayRange.end / nTick);
-				} else {
-					nStartFrame = Math.round(Scene.getTime() / nTick);
-					nEndFrame = nStartFrame;
-				}
+                if (job.override) {
+                    nStartFrame = Math.round(oPlayRange.start / nTick);
+                    nEndFrame = Math.round(oPlayRange.end / nTick);
+                } else {
+                    nStartFrame = Math.round(Scene.getTime() / nTick);
+                    nEndFrame = nStartFrame;
+                }
 
                 var nTotalFrames = (nEndFrame - nStartFrame) + 1;
                 
@@ -403,8 +421,8 @@
                         var currentCam = aCamsToRender[c];
                         MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(currentCam);
 
-                        var sCamSafeName = currentCam.name.replace(/[^a-z0-9_-]/gi, '_');
-                        var sProgressText = "Scene " + (s+1) + "/" + aQueue.length + " (F: " + (f+1) + "/" + nTotalFrames + ") [Cam: " + currentCam.name + "]";
+                        var sCamSafeName = currentCam.getLabel().replace(/[^a-z0-9_-]/gi, '_');
+                        var sProgressText = "Scene " + (s+1) + "/" + aQueue.length + " (F: " + (f+1) + "/" + nTotalFrames + ") [Cam: " + currentCam.getLabel() + "]";
                         updateListRow(s, job.path + " [" + sProgressText + "]");
                         print(sProgressText); 
 
@@ -428,11 +446,21 @@
                         oOpt.renderImgFilename = sOutFile;
                         oOpt.isCurrentFrameRender = true; 
                         
+                        bNativeRenderSuccess = true; 
+                        
                         oRenderMgr.doRender(oOpt); 
                         while( oRenderMgr.isRendering() ){ 
                             processEvents(); 
                             sleep(500); 
                         }
+                        
+                        // Check if the user aborted via the DAZ UI
+                        if ( bNativeRenderSuccess == false ) {
+                            bCancelQueue = true;
+                            wBtnCancel.text = "STOPPING...";
+                            print("--- DAZ Native Cancel Detected. Aborting Queue ---");
+                        }
+                        
                         if(bCancelQueue) break; 
                     }
                     if(bCancelQueue) { saveState(s, f); break; }
@@ -454,6 +482,7 @@
             }
         }
         
+        oRenderMgr.renderFinished.disconnect( onRenderFinish );
         wBtnRun.enabled = true; wBtnRun.text = "START RENDER QUEUE"; wBtnCancel.text = "STOP QUEUE";
         
         if(!bCancelQueue) { 
