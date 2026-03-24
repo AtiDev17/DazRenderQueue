@@ -1,5 +1,7 @@
 (function(){
-    var sStateFile  = App.getTempPath() + "/queue_state.json"; 
+
+    // Persistent auto-save file so it survives PC reboots and DAZ restarts
+    var sStateFile  = App.getAppDataPath() + "/RenderQueueState.json"; 
 
     var aQueue =[];
     var oState = {
@@ -18,10 +20,15 @@
         } catch(e) { return nDef; }
     }
 
-    function getItemIndex( targetItem ) {
-        if(!targetItem) return -1;
-        var idx = parseInt(targetItem.text(1));
-        return isNaN(idx) ? -1 : idx;
+    function getItemIndex( listView, targetItem ) {
+        var current = listView.firstChild();
+        var idx = 0;
+        while( current ) {
+            if( current.text(0) === targetItem.text(0) ) return idx;
+            current = current.nextSibling();
+            idx++;
+        }
+        return -1;
     }
 
     function loadLastDir(){
@@ -84,10 +91,6 @@
 
     var wList = new DzListView(wDlg);
     wList.addColumn("Queue Items"); 
-    wList.addColumn("ID"); 
-    wList.setColumnWidth(0, 700); 
-    wList.setColumnWidth(1, 0); 
-    wList.allColumnsShowFocus = true;
     wLayout.addWidget(wList);
     
     function refreshListUI() {
@@ -95,19 +98,13 @@
         for(var i=0; i<aQueue.length; i++) {
             var wItem = new DzListViewItem(wList);
             wItem.setText(0, aQueue[i].path + getJobStatusStr(aQueue[i]));
-            wItem.setText(1, i.toString()); 
         }
     }
 
     function updateListRow(idx, textStr) {
         var curr = wList.firstChild();
-        while(curr) {
-            if(parseInt(curr.text(1)) === idx) {
-                curr.setText(0, textStr);
-                return;
-            }
-            curr = curr.nextSibling();
-        }
+        for(var i=0; i<idx; i++){ if(curr) curr = curr.nextSibling(); }
+        if(curr) curr.setText(0, textStr);
     }
 
     var wTopBtnContainer = new DzWidget(wDlg);
@@ -157,6 +154,9 @@
         } else { saveState(oState.sceneIdx, oState.frameIdx); }
     }
     
+    wLineWait.textChanged.connect(function(){ syncState(); });
+    wChkShutdown.toggled.connect(function(){ syncState(); });
+
     wBtnReset.clicked.connect(function(){
         if( MessageBox.question("Are you sure you want to clear the queue and reset all progress?", "Confirm Reset", "&Yes", "&No") == 0 ){
             aQueue =[];
@@ -178,12 +178,13 @@
     wBtnRemove.clicked.connect(function(){
         if( wBtnRun.enabled == false ) return; 
         var wItem = wList.currentItem(); if(!wItem) return;
-        var idx = getItemIndex(wItem);
+        var idx = getItemIndex(wList, wItem);
         if(idx > -1) { aQueue.splice(idx, 1); refreshListUI(); syncState(); }
     });
 
     wBtnExport.clicked.connect(function(){
         if(aQueue.length === 0) return;
+        sLastOpenDir = loadLastDir();
         var sSavePath = FileDialog.doFileDialog(false, "Save Queue Session", sLastOpenDir, "JSON Queue (*.json)");
         if(!sSavePath) return;
         var oFile = new DzFile(sSavePath);
@@ -192,6 +193,7 @@
             oState.shutdown = wChkShutdown.checked;
             var oData = { isNativeSession: true, queue: aQueue, state: oState };
             oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
+            saveLastDir(new DzFileInfo(sSavePath).path());
         }
     });
 
@@ -203,6 +205,7 @@
 
         for (var fIdx = 0; fIdx < aPaths.length; fIdx++) {
             var sFile = aPaths[fIdx].replace(/\\/g, "/");
+            
             if( sFile.toLowerCase().endsWith(".json") ){
                 var oFile = new DzFile(sFile);
                 if( oFile.open( DzFile.ReadOnly ) ){
@@ -210,7 +213,7 @@
                         var sData = oFile.read(); var parsedData = JSON.parse(sData);
                         if(parsedData.isNativeSession) {
                             aQueue = parsedData.queue; oState = parsedData.state;
-                            refreshListUI(); wLineWait.text = oState.smoothWait.toString();
+                            wLineWait.text = oState.smoothWait.toString();
                             wChkShutdown.checked = oState.shutdown || false;
                         } else {
                             var tempArr = parsedData.scenes || (Array.isArray(parsedData) ? parsedData : [parsedData]);
@@ -221,18 +224,22 @@
                                 if( p != "" ) aQueue.push({ path: p, cam: c, override: isOver, done: false });
                             }
                         }
-                    } catch(e) {}
+                    } catch(e) {
+                        print("--- ERROR: Could not parse JSON file: " + sFile);
+                    }
                     oFile.close();
                 }
-            } else { aQueue.push({ path: sFile, cam: "", override: false, done: false }); }
+            } else { 
+                aQueue.push({ path: sFile, cam: "", override: false, done: false }); 
+            }
         }
-        refreshListUI(); syncState();
+        refreshListUI(); 
+        syncState();
     });
     
     function openEditDialog( item ) {
         if( !item ) return;
-        var idx = getItemIndex( item );
-        if(idx === -1) return;
+        var idx = getItemIndex( wList, item );
         var job = aQueue[idx];
         
         var wEditDlg = new DzBasicDialog(); 
@@ -282,31 +289,25 @@
     wList.doubleClicked.connect( openEditDialog );
     
     function saveState( currentScene, currentFrameRel ){
-        oState.sceneIdx = currentScene; oState.frameIdx = currentFrameRel;
+        oState.sceneIdx = currentScene || 0; 
+        oState.frameIdx = currentFrameRel || 0;
         oState.smoothWait = getInt(wLineWait, 3);
         oState.shutdown = wChkShutdown.checked;
         var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
-            oFile.write( JSON.stringify({ queue: aQueue, state: oState }) ); oFile.close();
+            oFile.write( JSON.stringify({ queue: aQueue, state: oState }, null, 4) ); oFile.close();
         }
     }
 
     function loadState(){
         var oFile = new DzFile(sStateFile);
         if( oFile.exists() && oFile.open( DzFile.ReadOnly ) ){
-            var bSuccess = false;
             try {
-                var oData = JSON.parse( oFile.read() ); 
-                aQueue = oData.queue; 
-                oState = oData.state;
+                var oData = JSON.parse( oFile.read() ); aQueue = oData.queue; oState = oData.state;
                 wLineWait.text = oState.smoothWait.toString();
                 wChkShutdown.checked = oState.shutdown || false;
-                refreshListUI(); 
-                bSuccess = true;
-            } catch(e) { 
-                print("Error parsing queue state: " + e);
-            }
+                refreshListUI(); return true;
+            } catch(e){ }
             oFile.close();
-            return bSuccess;
         }
         return false;
     }
@@ -326,7 +327,6 @@
         var oContentMgr = App.getContentMgr();
         var nWaitMs = getInt(wLineWait, 3) * 1000;
         
-        // Listener to catch native DAZ render cancelation
         var bNativeRenderSuccess = true;
         var onRenderFinish = function( bSuccess ) {
             bNativeRenderSuccess = bSuccess;
@@ -454,7 +454,6 @@
                             sleep(500); 
                         }
                         
-                        // Check if the user aborted via the DAZ UI
                         if ( bNativeRenderSuccess == false ) {
                             bCancelQueue = true;
                             wBtnCancel.text = "STOPPING...";
