@@ -7,7 +7,7 @@
     var oState = {
         sceneIdx: 0,
         frameIdx: 0,     
-        smoothWait: 3,
+        smoothWait: 0,
         shutdown: false
     };
     var bCancelQueue = false;
