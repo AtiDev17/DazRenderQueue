@@ -464,6 +464,8 @@
                             processEvents(); 
                             sleep(500); 
                         }
+                        // Process events one more time to catch the renderFinished signal
+                        processEvents();
                         
                         // Check if the user aborted via the DAZ UI
                         if ( bNativeRenderSuccess == false ) {
