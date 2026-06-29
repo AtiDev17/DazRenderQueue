@@ -127,7 +127,7 @@
     var wGlobLayout = new DzGridLayout(wGrpGlob); 
 
     var lblWait = new DzLabel(wGrpGlob); lblWait.text = "Smoothing Wait (Seconds):";
-    var wLineWait = new DzLineEdit(wGrpGlob); wLineWait.text = "3";
+    var wLineWait = new DzLineEdit(wGrpGlob); wLineWait.text = "0";
     wGlobLayout.addWidget(lblWait, 0, 0); wGlobLayout.addWidget(wLineWait, 0, 1);
     
     var wChkShutdown = new DzCheckBox(wGrpGlob);
@@ -193,7 +193,7 @@
         if(!sSavePath) return;
         var oFile = new DzFile(sSavePath);
         if(oFile.open(DzFile.WriteOnly | DzFile.Truncate)){
-            oState.smoothWait = getInt(wLineWait, 3);
+            oState.smoothWait = getInt(wLineWait, 0);
             oState.shutdown = wChkShutdown.checked;
             var oData = { isNativeSession: true, queue: aQueue, state: oState };
             oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
@@ -292,7 +292,7 @@
     function saveState( currentScene, currentFrameRel ){
         oState.sceneIdx = currentScene || 0; 
         oState.frameIdx = currentFrameRel || 0;
-        oState.smoothWait = getInt(wLineWait, 3);
+        oState.smoothWait = getInt(wLineWait, 0);
         oState.shutdown = wChkShutdown.checked;
         var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
             oFile.write( JSON.stringify({ queue: aQueue, state: oState }, null, 4) ); oFile.close();
@@ -333,7 +333,6 @@
 
         var oRenderMgr = App.getRenderMgr(); 
         var oContentMgr = App.getContentMgr();
-        var nWaitMs = getInt(wLineWait, 3) * 1000;
         
         var bNativeRenderSuccess = true;
         var onRenderFinish = function( bSuccess ) {
@@ -424,11 +423,14 @@
                     var nAbsFrame = nStartFrame + f;
                     Scene.setTime( nAbsFrame * nTick ); Scene.update();
 
+                    var nCurrentWaitMs = getInt(wLineWait, 0) * 1000;
                     var nStartWait = new Date().getTime();
-                    while( (new Date().getTime() - nStartWait) < nWaitMs ){ 
+                    while( (new Date().getTime() - nStartWait) < nCurrentWaitMs ){ 
                         processEvents(); 
+                        sleep(50);
                         if(bCancelQueue) break; 
                     }
+
                     if(bCancelQueue) { saveState(s, f); break; }
 
                     for( var c = 0; c < aCamsToRender.length; c++ ) {
