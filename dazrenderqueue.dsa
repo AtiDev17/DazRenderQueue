@@ -1,6 +1,5 @@
 (function(){
 
-    // Persistent auto-save file so it survives PC reboots and DAZ restarts
     var sStateFile  = App.getAppDataPath() + "/RenderQueueState.json"; 
 
     var aQueue =[];
@@ -159,7 +158,6 @@
         } else { saveState(oState.sceneIdx, oState.frameIdx); }
     }
     
-    // Auto-save triggers when global settings change
     wLineWait.textChanged.connect(function(){ syncState(); });
     wChkShutdown.toggled.connect(function(){ syncState(); });
 
@@ -337,7 +335,6 @@
         var oContentMgr = App.getContentMgr();
         var nWaitMs = getInt(wLineWait, 3) * 1000;
         
-        // Listener to catch native DAZ render cancelation
         var bNativeRenderSuccess = true;
         var onRenderFinish = function( bSuccess ) {
             bNativeRenderSuccess = bSuccess;
@@ -363,10 +360,16 @@
             } else {
                 updateListRow(s, job.path + " [LOADING...]");
                 Scene.clear();
-                if( oContentMgr.openNativeFile( job.path, false ) ) {
-                    bSceneReady = true;
-                } else {
-                    print("--- ERROR: Failed to load scene file: " + job.path);
+                
+                App.startPromptSuppression();
+                try {
+                    if( oContentMgr.openNativeFile( job.path, false ) ) {
+                        bSceneReady = true;
+                    } else {
+                        print("--- ERROR: Failed to load scene file: " + job.path);
+                    }
+                } finally {
+                    App.endPromptSuppression();
                 }
             }
             
@@ -464,10 +467,8 @@
                             processEvents(); 
                             sleep(500); 
                         }
-                        // Process events one more time to catch the renderFinished signal
                         processEvents();
                         
-                        // Check if the user aborted via the DAZ UI
                         if ( bNativeRenderSuccess == false ) {
                             bCancelQueue = true;
                             wBtnCancel.text = "STOPPING...";
