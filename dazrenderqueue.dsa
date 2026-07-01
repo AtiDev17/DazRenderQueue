@@ -10,6 +10,7 @@
         shutdown: false
     };
     var bCancelQueue = false;
+    var bAutoCloseDialogs = false;
 
     function getInt( wWidget, nDef ){
         try {
@@ -320,6 +321,19 @@
         return false;
     }
 
+    App.possibleActiveModalWidgetChange.connect(function() {
+        if (!bAutoCloseDialogs) return;
+        if (!App.hasActiveModalWidget()) return;
+        var w = App.getDialogParent();
+        if (!w) return;
+        try {
+            var n = w.className ? w.className() : "";
+            if (n === "DzMissingAssetsDlg") {
+                w.reject();
+            }
+        } catch(e) {}
+    });
+
     wBtnRun.clicked.connect(function(){
         var sWorkingDir = wLineOut.text.replace(/\\/g, "/");
         if( sWorkingDir.trim() === "" || sWorkingDir.trim() === "/" ) {
@@ -360,15 +374,30 @@
                 updateListRow(s, job.path + " [LOADING...]");
                 Scene.clear();
                 
-                App.startPromptSuppression();
+                bAutoCloseDialogs = true;
                 try {
                     if( oContentMgr.openNativeFile( job.path, false ) ) {
                         bSceneReady = true;
+                        for (var wait = 0; wait < 20; wait++) {
+                            processEvents();
+                            if (App.hasActiveModalWidget()) {
+                                var w = App.getDialogParent();
+                                if (w) {
+                                    try {
+                                        var n = w.className ? w.className() : "";
+                                        if (n === "DzMissingAssetsDlg") {
+                                            w.reject();
+                                        }
+                                    } catch(e) {}
+                                }
+                            }
+                            sleep(100);
+                        }
                     } else {
                         print("--- ERROR: Failed to load scene file: " + job.path);
                     }
                 } finally {
-                    App.endPromptSuppression();
+                    bAutoCloseDialogs = false;
                 }
             }
             
