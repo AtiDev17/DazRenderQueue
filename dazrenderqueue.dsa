@@ -106,6 +106,8 @@
         while(curr) {
             if(parseInt(curr.text(1)) === idx) {
                 curr.setText(0, textStr);
+                wList.ensureItemVisible(curr);
+                wList.setCurrentItem(curr);
                 return;
             }
             curr = curr.nextSibling();
