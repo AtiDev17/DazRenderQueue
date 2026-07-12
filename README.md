@@ -4,6 +4,13 @@ This project is work in progress!
 
 A simple, lightweight batch rendering script for DAZ Studio that automatically renders multiple scenes in sequence. 
 
+## How to install/remove the script:
+
+Put the script in one of your content library folders. In Daz, go to the Content Library and find the script, then right-click it and select Create Custom Script. For Root, select scripts and then accept. Now, in the top toolbar under Scripts, you should see the Render Queue script, and from there you can open the UI.
+
+If you want to remove it, go to Windows > Workspace > Customize. In the text filter, search for the script name once in Actions and once in Menus, and delete it from both.
+
+
 ### How to Use
 Load the script into DAZ Studio, select your desired render output directory, and click **+ ADD SCENES / JSON** to queue up your `.duf` files. If you need to specify a target camera or render an animation, just double-click it in the list. Once your queue is ready, click **START RENDER QUEUE** and let DAZ handle the rest.
 
