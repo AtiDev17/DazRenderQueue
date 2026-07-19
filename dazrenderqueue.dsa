@@ -86,9 +86,7 @@
 
     var wList = new DzListView(wDlg);
     wList.addColumn("Queue Items"); 
-    wList.addColumn("ID"); 
     wList.setColumnWidth(0, 700); 
-    wList.setColumnWidth(1, 0); 
     wList.allColumnsShowFocus = true;
     wLayout.addWidget(wList);
     
@@ -323,7 +321,7 @@
         return false;
     }
 
-    App.possibleActiveModalWidgetChange.connect(function() {
+    var onModalWidgetChange = function() {
         if (!bAutoCloseDialogs) return;
         if (!App.hasActiveModalWidget()) return;
         var w = App.getDialogParent();
@@ -334,7 +332,8 @@
                 w.reject();
             }
         } catch(e) {}
-    });
+    };
+    App.possibleActiveModalWidgetChange.connect(onModalWidgetChange);
 
     wBtnRun.clicked.connect(function(){
         var sWorkingDir = wLineOut.text.replace(/\\/g, "/");
@@ -547,5 +546,7 @@
 
     if( loadState() ) wBtnRun.text = (oState.sceneIdx >= aQueue.length) ? "START RENDER QUEUE" : "RESUME (Scene " + (oState.sceneIdx+1) + ")";
     wDlg.exec();
+
+    App.possibleActiveModalWidgetChange.disconnect(onModalWidgetChange);
 
 })();
