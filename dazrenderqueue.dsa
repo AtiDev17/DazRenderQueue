@@ -41,6 +41,16 @@
         return job.override ? " [Animation]" : " [Current Frame]";
     }
 
+    function get3DViewport() {
+        try {
+            var vpMgr = MainWindow.getViewportMgr();
+            if (!vpMgr) return null;
+            var vp = vpMgr.getActiveViewport();
+            if (!vp) return null;
+            return vp.get3DViewport();
+        } catch(e) { return null; }
+    }
+
     var sLastOpenDir = loadLastDir();
     
     var wDlg = new DzDialog();
@@ -114,13 +124,11 @@
 
     var wTopBtnContainer = new DzWidget(wDlg);
     var wTopBtnLayout = new DzGridLayout(wTopBtnContainer);
-    var wBtnAdd = new DzPushButton(wTopBtnContainer); wBtnAdd.text = "+ ADD SCENES / JSON"; wBtnAdd.minHeight = 40;
+    var wBtnAdd = new DzPushButton(wTopBtnContainer); wBtnAdd.text = "+ ADD SCENES"; wBtnAdd.minHeight = 40;
     var wBtnRemove = new DzPushButton(wTopBtnContainer); wBtnRemove.text = "- REMOVE SELECTED"; wBtnRemove.minHeight = 40;
-    var wBtnExport = new DzPushButton(wTopBtnContainer); wBtnExport.text = "EXPORT SESSION"; wBtnExport.minHeight = 40;
     
     wTopBtnLayout.addWidget(wBtnAdd, 0, 0);
     wTopBtnLayout.addWidget(wBtnRemove, 0, 1);
-    wTopBtnLayout.addWidget(wBtnExport, 0, 2);
     wLayout.addWidget(wTopBtnContainer);
     
     var wGrpGlob = new DzGroupBox(wDlg);
@@ -161,7 +169,7 @@
     
     wLineWait.textChanged.connect(function(){ syncState(); });
     wChkShutdown.toggled.connect(function(){ syncState(); });
-
+    
     wBtnReset.clicked.connect(function(){
         if( MessageBox.question("Are you sure you want to clear the queue and reset all progress?", "Confirm Reset", "&Yes", "&No") == 0 ){
             aQueue =[];
@@ -187,53 +195,15 @@
         if(idx > -1) { aQueue.splice(idx, 1); refreshListUI(); syncState(); }
     });
 
-    wBtnExport.clicked.connect(function(){
-        if(aQueue.length === 0) return;
-        sLastOpenDir = loadLastDir();
-        var sSavePath = FileDialog.doFileDialog(false, "Save Queue Session", sLastOpenDir, "JSON Queue (*.json)");
-        if(!sSavePath) return;
-        var oFile = new DzFile(sSavePath);
-        if(oFile.open(DzFile.WriteOnly | DzFile.Truncate)){
-            oState.smoothWait = getInt(wLineWait, 0);
-            oState.shutdown = wChkShutdown.checked;
-            var oData = { isNativeSession: true, queue: aQueue, state: oState };
-            oFile.write(JSON.stringify(oData, null, 4)); oFile.close();
-            saveLastDir(new DzFileInfo(sSavePath).path());
-        }
-    });
-
     wBtnAdd.clicked.connect(function(){
         sLastOpenDir = loadLastDir();
-        var aPaths = FileDialog.getOpenFileNames( sLastOpenDir, "Supported Files (*.duf *.json);;DAZ Scene (*.duf);;JSON Queue (*.json)", "Select Scenes or JSON" );
+        var aPaths = FileDialog.getOpenFileNames( sLastOpenDir, "DAZ Scene (*.duf)", "Select Scenes" );
         if( !aPaths || aPaths.length === 0 ) return;
         var oFileInfo = new DzFileInfo(aPaths[0]); sLastOpenDir = oFileInfo.path(); saveLastDir(sLastOpenDir); 
 
         for (var fIdx = 0; fIdx < aPaths.length; fIdx++) {
             var sFile = aPaths[fIdx].replace(/\\/g, "/");
-            if( sFile.toLowerCase().endsWith(".json") ){
-                var oFile = new DzFile(sFile);
-                if( oFile.open( DzFile.ReadOnly ) ){
-                    try {
-                        var sData = oFile.read(); var parsedData = JSON.parse(sData);
-                        if(parsedData.isNativeSession) {
-                            aQueue = parsedData.queue; oState = parsedData.state;
-                            refreshListUI(); wLineWait.text = oState.smoothWait.toString();
-                            wChkShutdown.checked = oState.shutdown || false;
-                        } else {
-                            var tempArr = parsedData.scenes || (Array.isArray(parsedData) ? parsedData : [parsedData]);
-                            for(var i=0; i<tempArr.length; i++){
-                                var scn = tempArr[i]; var p = scn.file || scn.path || "";
-                                var c = (scn.sceneAttrs && scn.sceneAttrs.cameraCurrent) ? scn.sceneAttrs.cameraCurrent : (scn.cam || "");
-                                var isOver = scn.override || false;
-                                if( p != "" ) aQueue.push({ path: p, cam: c, override: isOver, done: false });
-                            }
-                        }
-                    } catch(e) {
-                        print("--- ERROR: Could not parse JSON file: " + sFile);
-                    }
-                    oFile.close();
-                }
-            } else { aQueue.push({ path: sFile, cam: "", override: false, done: false }); }
+            aQueue.push({ path: sFile, cam: "", override: false, done: false });
         }
         refreshListUI(); syncState();
     });
@@ -379,8 +349,10 @@
                 try {
                     if( oContentMgr.openNativeFile( job.path, false ) ) {
                         bSceneReady = true;
-                        for (var wait = 0; wait < 20; wait++) {
+                        var nLoadStart = new Date().getTime();
+                        while (Scene.isLoading() && (new Date().getTime() - nLoadStart) < 60000) {
                             processEvents();
+                            if (bCancelQueue) { bSceneReady = false; break; }
                             if (App.hasActiveModalWidget()) {
                                 var w = App.getDialogParent();
                                 if (w) {
@@ -402,13 +374,16 @@
                 }
             }
             
+            if (bCancelQueue) break;
+            
             if( bSceneReady ){
                 var oOpt = oRenderMgr.getRenderOptions();
                 var sOrigRenderImgFilename = oOpt.renderImgFilename;
                 var nOrigRenderImgToId = oOpt.renderImgToId;
                 var bOrigIsCurrentFrameRender = oOpt.isCurrentFrameRender;
                 var nOrigTime = Scene.getTime();
-                var oActiveCam = MainWindow.getViewportMgr().getActiveViewport().get3DViewport().getCamera();
+                var vp3d = get3DViewport();
+                var oActiveCam = vp3d ? vp3d.getCamera() : null;
 
                 var aCamsToRender = [];
                 if( job.cam.toUpperCase() === "ALL" ) {
@@ -421,12 +396,16 @@
                     }
                     if(aCamsToRender.length === 0 && oActiveCam) aCamsToRender.push(oActiveCam);
                 } else if( job.cam != "" ){
-                    var oCamNode = Scene.findNodeByLabel(job.cam);
-                    if(oCamNode) {
-                        aCamsToRender.push(oCamNode);
-                    } else {
-                        if(oActiveCam) aCamsToRender.push(oActiveCam);
+                    var allCams = Scene.getCameraList();
+                    var bFound = false;
+                    for (var cIdx=0; cIdx < allCams.length; cIdx++) {
+                        if (allCams[cIdx].name === job.cam) {
+                            aCamsToRender.push(allCams[cIdx]);
+                            bFound = true;
+                            break;
+                        }
                     }
+                    if (!bFound && oActiveCam) aCamsToRender.push(oActiveCam);
                 } else {
                     if(oActiveCam) aCamsToRender.push(oActiveCam);
                 }
@@ -465,7 +444,7 @@
 
                     for( var c = 0; c < aCamsToRender.length; c++ ) {
                         var currentCam = aCamsToRender[c];
-                        MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(currentCam);
+                        var vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(currentCam);
 
                         var sCamSafeName = currentCam.getLabel().replace(/[^a-z0-9_-]/gi, '_');
                         var sProgressText = "Scene " + (s+1) + "/" + aQueue.length + " (F: " + (f+1) + "/" + nTotalFrames + ") [Cam: " + currentCam.getLabel() + "]";
@@ -517,7 +496,7 @@
                 oOpt.isCurrentFrameRender = bOrigIsCurrentFrameRender;
                 Scene.setTime( nOrigTime ); 
                 if(oActiveCam) {
-                    MainWindow.getViewportMgr().getActiveViewport().get3DViewport().setCamera(oActiveCam);
+                    var vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(oActiveCam);
                 }
                 Scene.update();
                 
