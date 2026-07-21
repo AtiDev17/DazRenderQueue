@@ -1,7 +1,5 @@
 # DazRenderQueue
 
-This project is work in progress!
-
 A simple, lightweight batch rendering script for DAZ Studio that automatically renders multiple scenes in sequence. 
 
 ## How to install/remove the script:
