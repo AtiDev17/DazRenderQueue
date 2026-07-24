@@ -125,10 +125,12 @@
     var wTopBtnContainer = new DzWidget(wDlg);
     var wTopBtnLayout = new DzGridLayout(wTopBtnContainer);
     var wBtnAdd = new DzPushButton(wTopBtnContainer); wBtnAdd.text = "+ ADD SCENES"; wBtnAdd.minHeight = 40;
+    var wBtnAddCurrent = new DzPushButton(wTopBtnContainer); wBtnAddCurrent.text = "+ ADD CURRENT SCENE"; wBtnAddCurrent.minHeight = 40;
     var wBtnRemove = new DzPushButton(wTopBtnContainer); wBtnRemove.text = "- REMOVE SELECTED"; wBtnRemove.minHeight = 40;
     
     wTopBtnLayout.addWidget(wBtnAdd, 0, 0);
-    wTopBtnLayout.addWidget(wBtnRemove, 0, 1);
+    wTopBtnLayout.addWidget(wBtnAddCurrent, 0, 1);
+    wTopBtnLayout.addWidget(wBtnRemove, 0, 2);
     wLayout.addWidget(wTopBtnContainer);
     
     var wGrpGlob = new DzGroupBox(wDlg);
@@ -205,6 +207,16 @@
             var sFile = aPaths[fIdx].replace(/\\/g, "/");
             aQueue.push({ path: sFile, cam: "", override: false, done: false });
         }
+        refreshListUI(); syncState();
+    });
+    
+    wBtnAddCurrent.clicked.connect(function(){
+        var sFile = Scene.getFilename().replace(/\\/g, "/");
+        if( !sFile ) {
+            MessageBox.warning("No scene is loaded. Open or save your scene first.", "No Scene Open", "&OK");
+            return;
+        }
+        aQueue.push({ path: sFile, cam: "", override: false, done: false });
         refreshListUI(); syncState();
     });
     
