@@ -12,6 +12,215 @@
     var bCancelQueue = false;
     var bAutoCloseDialogs = false;
 
+    // OUTPUT HELPERS BEGIN - also exercised outside DAZ by the regression tests.
+    var outputFormats = [
+        { extension: "png", label: "PNG (.png)" },
+        { extension: "jpg", label: "JPEG (.jpg)" },
+        { extension: "tif", label: "TIFF (.tif)" },
+        { extension: "bmp", label: "BMP (.bmp)" }
+    ];
+
+    function outputExtension(job) {
+        return job.outputFormat || "png";
+    }
+
+    function cameraMode(job) {
+        return job.camMode || (job.cam ? (job.cam.toUpperCase() === "ALL" ? "all" : "named") : "active");
+    }
+
+    function outputStem(job) {
+        if (job.outputName) return job.outputName;
+        var filename = job.path.replace(/\\/g, "/").split("/").pop();
+        return filename.replace(/\.[^.]+$/, "");
+    }
+
+    function normalizeOutputName(name) {
+        return name.trim().replace(/\.(png|jpe?g|tiff?|bmp)$/i, "");
+    }
+
+    function outputError(job) {
+        var stem = outputStem(job);
+        if (!stem || /[<>:"/\\|?*\x00-\x1f]/.test(stem) || /[. ]$/.test(stem))
+            return "Enter a filename without folder paths or these characters: < > : \" / \\ | ? *. It cannot end with a space or period.";
+        if (/^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(stem))
+            return "That filename is reserved by Windows. Please choose another name.";
+        if (stem.length > 200) return "Please keep the filename to 200 characters or fewer.";
+        for (var i = 0; i < outputFormats.length; i++) {
+            if (outputFormats[i].extension === outputExtension(job)) return "";
+        }
+        return "Choose PNG, JPEG, TIFF, or BMP as the file type.";
+    }
+
+    function queueOutputError(queue) {
+        var names = {};
+        for (var i = 0; i < queue.length; i++) {
+            var error = outputError(queue[i]);
+            if (error) return "Scene " + (i + 1) + ": " + error;
+            // On Windows, filenames differing only in case still collide.
+            var key = "$" + outputStem(queue[i]).toLowerCase() + "." + outputExtension(queue[i]);
+            if (names[key]) return "Scenes " + names[key] + " and " + (i + 1) + " use the same output name and file type. Give them different filenames in Scene Options.";
+            names[key] = i + 1;
+        }
+        return "";
+    }
+
+    function claimOutput(owners, relativePath, owner) {
+        var key = "$" + relativePath.toLowerCase();
+        if (owners[key] !== undefined && owners[key] !== owner) return false;
+        owners[key] = owner;
+        return true;
+    }
+
+    function outputRelativePath(job, cameraName, cameraCount, frameCount, frame) {
+        var stem = outputStem(job);
+        var extension = "." + outputExtension(job);
+        var number = String(Math.abs(frame));
+        while (number.length < 4) number = "0" + number;
+        if (frame < 0) number = "-" + number;
+        var frameSuffix = frameCount > 1 ? "_Frame" + number : "";
+        if (cameraMode(job) === "all" && cameraCount > 1) {
+            return (frameCount > 1 ? stem + "/" + cameraName + "/" : "") + stem + "_" + cameraName + frameSuffix + extension;
+        }
+        return (frameCount > 1 ? stem + "/" : "") + stem + frameSuffix + extension;
+    }
+    // OUTPUT HELPERS END
+
+    // CAMERA HELPERS BEGIN - read saved metadata; never open a scene in DAZ.
+    function dsonReference(uri) {
+        var hash = uri.indexOf("#");
+        if (hash < 0) throw new Error("Missing node identifier in camera reference.");
+        var file = decodeURIComponent(uri.slice(0, hash));
+        if ((/^[a-z][a-z0-9+.-]*:\/\//i.test(file) && !/^file:\/\/\//i.test(file)) || /^[/\\]{2}/.test(file))
+            throw new Error("Remote camera references are not supported.");
+        if (/^file:\/\/\//i.test(file)) file = file.replace(/^file:\/\/\//i, "");
+        else if (!/^[a-z]:[/\\]/i.test(file)) file = file.replace(/^[^:/\\]+:/, "");
+        return {file: file, id: decodeURIComponent(uri.slice(hash + 1))};
+    }
+
+    function collectSceneCameras(document, filename, readDocument, resolveFile) {
+        var documents = {};
+        documents["$" + filename] = document;
+        var warnings = [];
+        var cameras = [];
+        function definition(uri, from, seen) {
+            if (seen.length >= 16) throw new Error("Camera reference chain is too deep.");
+            var ref = dsonReference(uri);
+            var file = ref.file ? resolveFile(ref.file, from) : from;
+            if (!file) throw new Error("A referenced camera asset could not be found.");
+            var key = file + "#" + ref.id;
+            if (seen.indexOf(key) >= 0) throw new Error("Circular camera reference.");
+            var data = documents["$" + file];
+            if (!data) data = documents["$" + file] = readDocument(file);
+            var nodes = data.node_library || [];
+            for (var i = 0; i < nodes.length; i++) {
+                var node = nodes[i];
+                if (node.id !== ref.id) continue;
+                // A fully described camera must still be listed if its original
+                // source asset was moved. Only follow sources for missing metadata.
+                var needsSource = !node.type || (node.type === "camera" && !node.name);
+                var inherited = node.source && needsSource ? definition(node.source, file, seen.concat([key])) : {};
+                return {type: node.type || inherited.type, name: node.name || inherited.name, label: node.label || inherited.label};
+            }
+            throw new Error("A referenced node definition could not be found.");
+        }
+        var instances = (document.scene || {}).nodes || [];
+        for (var i = 0; i < instances.length; i++) {
+            var instance = instances[i];
+            try {
+                var base = instance.type === "camera" ? instance : definition(instance.url || "", filename, []);
+                if (base.type !== "camera") continue;
+                var name = instance.name || base.name;
+                if (!name) throw new Error("A saved camera has no name.");
+                cameras.push({name: name, label: instance.label || base.label || name, id: instance.id || name});
+            } catch (error) {
+                warnings.push(String(error));
+            }
+        }
+        cameras.sort(function(a, b) {
+            var left = a.label.toLowerCase(), right = b.label.toLowerCase();
+            return left < right ? -1 : (left > right ? 1 : 0);
+        });
+        return {cameras: cameras, warnings: warnings};
+    }
+
+    function cameraChoices(scan, job) {
+        var choices = [
+            {label: "Saved active camera", name: "", mode: "active"},
+            {label: "All cameras", name: "ALL", mode: "all"}
+        ];
+        for (var i = 0; i < scan.cameras.length; i++) {
+            var camera = scan.cameras[i];
+            var duplicate = false;
+            for (var j = 0; j < scan.cameras.length; j++) {
+                if (j !== i && scan.cameras[j].label === camera.label) duplicate = true;
+            }
+            var label = camera.label + (duplicate ? " (" + camera.name + "; " + camera.id + ")" : "");
+            if (label === "All cameras" || label === "Saved active camera") label += " (scene camera)";
+            choices.push({label: label, name: camera.name, cameraLabel: camera.label, mode: "named"});
+        }
+        var selected = cameraMode(job) === "active" ? 0 : (cameraMode(job) === "all" ? 1 : -1);
+        for (var k = 2; k < choices.length; k++) {
+            if (selected < 0 && choices[k].name === job.cam && (!job.camLabel || choices[k].cameraLabel === job.camLabel)) selected = k;
+        }
+        if (selected < 0) {
+            var matches = [];
+            for (var m = 2; m < choices.length; m++) if (choices[m].name === job.cam) matches.push(m);
+            if (matches.length === 1) selected = matches[0];
+        }
+        if (selected < 0) {
+            selected = choices.length;
+            choices.push({label: "Saved selection: " + (job.camLabel || job.cam) + " (not found in file)", name: job.cam, cameraLabel: job.camLabel || "", mode: "named"});
+        }
+        return {items: choices, selected: selected};
+    }
+
+    function selectedCameraIndex(cameras, job) {
+        var matches = [];
+        for (var i = 0; i < cameras.length; i++) {
+            if (cameras[i].name === job.cam) matches.push(i);
+        }
+        if (matches.length === 1) return matches[0];
+        if (matches.length === 0) return -1;
+        var labels = [];
+        for (var j = 0; j < matches.length; j++) {
+            if (cameras[matches[j]].label === job.camLabel) labels.push(matches[j]);
+        }
+        return labels.length === 1 ? labels[0] : -2;
+    }
+    // CAMERA HELPERS END
+
+    function readCameraDocument(filename) {
+        var probe = new DzFile(filename);
+        if (!probe.open(DzFile.ReadOnly)) throw new Error("The saved scene could not be read.");
+        var compressed;
+        try { compressed = (probe.readByte() & 255) === 31 && (probe.readByte() & 255) === 139; }
+        finally { probe.close(); }
+        var file = compressed ? new DzGZFile(filename) : new DzFile(filename);
+        if (!file.open(compressed ? DzGZFile.ReadOnly : DzFile.ReadOnly)) throw new Error("The saved scene could not be read.");
+        var text;
+        try { text = file.read(); }
+        finally { file.close(); }
+        return JSON.parse(text.replace(/^\uFEFF/, ""));
+    }
+
+    function scanSavedCameras(filename) {
+        try {
+            return collectSceneCameras(readCameraDocument(filename), filename, readCameraDocument, function(ref, from) {
+                if (/^[a-z]:[/\\]/i.test(ref)) {
+                    var direct = new DzFileInfo(ref);
+                    return direct.exists() && direct.isFile() ? direct.absFileName() : "";
+                }
+                if (ref.charAt(0) !== "/" && !/^[a-z]:[/\\]/i.test(ref)) {
+                    var relative = new DzFileInfo(new DzFileInfo(from).path() + "/" + ref);
+                    if (relative.exists() && relative.isFile()) return relative.absFileName();
+                }
+                return App.getContentMgr().findFile(ref);
+            });
+        } catch (error) {
+            return {cameras: [], warnings: [String(error)], failed: true};
+        }
+    }
+
     function getInt( wWidget, nDef ){
         try {
             var n = parseInt( wWidget.text );
@@ -36,9 +245,9 @@
         oSettings.setStringValue("LastOpenDir", sPath);
     }
 
-    function getJobStatusStr(job) {
-        if(job.done) return " [DONE]";
-        return job.override ? " [Animation]" : " [Current Frame]";
+    function getJobLabel(job) {
+        var status = job.done ? " [DONE]" : (job.override ? " [Animation]" : " [Current Frame]");
+        return outputStem(job) + "." + outputExtension(job) + status + " — " + job.path;
     }
 
     function get3DViewport() {
@@ -91,7 +300,7 @@
     });
 
     var lblInfo = new DzLabel(wDlg);
-    lblInfo.text = "Queue List (Double-Click an item to change Camera/Frames):";
+    lblInfo.text = "Queue List (Double-click a scene for filename, file type, camera, and frames):";
     wLayout.addWidget(lblInfo);
 
     var wList = new DzListView(wDlg);
@@ -104,7 +313,7 @@
         wList.clear();
         for(var i=0; i<aQueue.length; i++) {
             var wItem = new DzListViewItem(wList);
-            wItem.setText(0, aQueue[i].path + getJobStatusStr(aQueue[i]));
+            wItem.setText(0, getJobLabel(aQueue[i]));
             wItem.setText(1, i.toString()); 
         }
     }
@@ -221,6 +430,7 @@
     });
     
     function openEditDialog( item ) {
+        if (!wBtnRun.enabled) return;
         if( !item ) return;
         var idx = getItemIndex( item );
         if(idx === -1) return;
@@ -228,31 +438,68 @@
         
         var wEditDlg = new DzBasicDialog(); 
         wEditDlg.caption = "Scene Options";
-        wEditDlg.width = 400;
-        wEditDlg.height = 150;
+        wEditDlg.width = 540;
+        wEditDlg.height = 300;
         
         var wContainer = new DzWidget(wEditDlg);
         var wLyt = new DzVBoxLayout(wContainer);
         wLyt.margin = 0;
+
+        var lblName = new DzLabel(wContainer);
+        lblName.text = "Output filename (without extension; blank uses scene name):";
+        wLyt.addWidget(lblName);
+        var wEditName = new DzLineEdit(wContainer);
+        wEditName.text = job.outputName || "";
+        wLyt.addWidget(wEditName);
+        var lblFormat = new DzLabel(wContainer);
+        lblFormat.text = "File type:";
+        wLyt.addWidget(lblFormat);
+        var wEditFormat = new DzComboBox(wContainer);
+        for (var formatIndex = 0; formatIndex < outputFormats.length; formatIndex++) {
+            wEditFormat.addItem(outputFormats[formatIndex].label);
+            if (outputFormats[formatIndex].extension === outputExtension(job)) wEditFormat.currentItem = formatIndex;
+        }
+        wLyt.addWidget(wEditFormat);
+        var lblOutputHelp = new DzLabel(wContainer);
+        lblOutputHelp.text = "Camera/frame suffixes are added for batches. JPEG does not keep transparency.";
+        wLyt.addWidget(lblOutputHelp);
         
-        var sCamHelp = "<b>Target Camera Options</b><br><br>" +
-                       "• <b>Leave Blank:</b> Renders the saved active camera.<br>" +
-                       "• <b>Enter Name:</b> Renders a specific camera by name.<br>" +
-                       "• <b>Type 'ALL':</b> Renders every custom camera in the scene.";
+        var sCamHelp = "Choose a camera from the saved scene. Reading this list does not load the scene into DAZ.";
                        
         var sFrameHelp = "<b>Render Saved Animation Range?</b><br><br>" +
                          "• <b>Unchecked:</b> Renders only the single frame currently active on the timeline.<br>" +
                          "• <b>Checked:</b> Renders the full animation sequence based on the scene's Render Settings.";
         
         var lblCam = new DzLabel(wContainer); 
-        lblCam.text = "Target Camera Name:";
+        lblCam.text = "Camera:";
         lblCam.whatsThis = sCamHelp;
         wLyt.addWidget(lblCam);
         
-        var wEditCam = new DzLineEdit(wContainer); 
-        wEditCam.text = job.cam; 
+        var wEditCam = new DzComboBox(wContainer);
         wEditCam.whatsThis = sCamHelp;
         wLyt.addWidget(wEditCam);
+        var lblCameras = new DzLabel(wContainer);
+        lblCameras.wordWrap = true;
+        wLyt.addWidget(lblCameras);
+        var wRefreshCameras = new DzPushButton(wContainer);
+        wRefreshCameras.text = "Refresh cameras from saved scene";
+        wLyt.addWidget(wRefreshCameras);
+        var choices;
+        function populateCameras(selection) {
+            var scan = scanSavedCameras(job.path);
+            choices = cameraChoices(scan, selection);
+            wEditCam.clear();
+            for (var i = 0; i < choices.items.length; i++) wEditCam.addItem(choices.items[i].label);
+            wEditCam.currentItem = choices.selected;
+            lblCameras.text = scan.failed ? "Could not read cameras from the saved scene. Check the file and try Refresh." :
+                (scan.warnings.length ? "Some camera information could not be read. The list may be incomplete." :
+                (scan.cameras.length ? "Cameras read from the saved file. Save camera changes before refreshing." : "No saved cameras found. You can use the saved active view."));
+        }
+        populateCameras(job);
+        wRefreshCameras.clicked.connect(function() {
+            var selected = choices.items[wEditCam.currentItem];
+            populateCameras({cam: selected.name, camLabel: selected.cameraLabel || "", camMode: selected.mode});
+        });
         
         var wEditChk = new DzCheckBox(wContainer); 
         wEditChk.text = "Render Saved Animation Range?"; 
@@ -263,11 +510,30 @@
         wLyt.addStretch(1);
         wEditDlg.addWidget(wContainer);
         
-        if( wEditDlg.exec() ){
-            job.cam = wEditCam.text; 
+        while (wEditDlg.exec()) {
+            var name = normalizeOutputName(wEditName.text);
+            var format = outputFormats[wEditFormat.currentItem].extension;
+            var error = outputError({ path: job.path, outputName: name, outputFormat: format });
+            if (error) {
+                MessageBox.warning(error, "Output Filename", "&OK");
+                continue;
+            }
+            var cameraChoice = choices.items[wEditCam.currentItem];
+            var changed = (job.outputName || "") !== name || outputExtension(job) !== format || job.cam !== cameraChoice.name || cameraMode(job) !== cameraChoice.mode || (job.camLabel || "") !== (cameraChoice.cameraLabel || "") || job.override !== wEditChk.checked;
+            job.outputName = name;
+            job.outputFormat = format;
+            job.cam = cameraChoice.name;
+            job.camMode = cameraChoice.mode;
+            job.camLabel = cameraChoice.cameraLabel || "";
             job.override = wEditChk.checked; 
-            item.setText(0, job.path + getJobStatusStr(job)); 
+            if (changed) {
+                job.done = false;
+                oState.sceneIdx = Math.min(oState.sceneIdx, idx);
+                oState.frameIdx = 0;
+            }
+            item.setText(0, getJobLabel(job));
             syncState(); 
+            break;
         }
     }
     wList.doubleClicked.connect( openEditDialog );
@@ -278,7 +544,7 @@
         oState.smoothWait = getInt(wLineWait, 0);
         oState.shutdown = wChkShutdown.checked;
         var oFile = new DzFile(sStateFile); if( oFile.open( DzFile.WriteOnly | DzFile.Truncate ) ){
-            oFile.write( JSON.stringify({ queue: aQueue, state: oState }, null, 4) ); oFile.close();
+            oFile.writeUtf8( JSON.stringify({ queue: aQueue, state: oState }, null, 4) ); oFile.close();
         }
     }
 
@@ -318,6 +584,16 @@
     App.possibleActiveModalWidgetChange.connect(onModalWidgetChange);
 
     wBtnRun.clicked.connect(function(){
+        // Local safety fix: queue scene changes must not discard unsaved work.
+        if (Scene.needsSave()) {
+            MessageBox.warning("Save your scene before starting the render queue. Close this dialog, save the scene, then reopen Render Queue.", "Unsaved Scene", "&OK");
+            return;
+        }
+        var outputValidation = queueOutputError(aQueue);
+        if (outputValidation) {
+            MessageBox.warning(outputValidation, "Queue Output", "&OK");
+            return;
+        }
         var sWorkingDir = wLineOut.text.replace(/\\/g, "/");
         if( sWorkingDir.trim() === "" || sWorkingDir.trim() === "/" ) {
             MessageBox.warning("Please specify a valid Render Output Directory.", "Missing Output Directory", "&OK");
@@ -340,6 +616,7 @@
         bCancelQueue = false; 
         wBtnRun.enabled = false; 
         wBtnRun.text = "RENDERING...";
+        var outputOwners = {};
 
         for( var s = oState.sceneIdx; s < aQueue.length; s++ ){
             if(bCancelQueue) { break; }
@@ -398,7 +675,7 @@
                 var oActiveCam = vp3d ? vp3d.getCamera() : null;
 
                 var aCamsToRender = [];
-                if( job.cam.toUpperCase() === "ALL" ) {
+                if( cameraMode(job) === "all" ) {
                     var allCams = Scene.getCameraList();
                     var aDefaultCams = ["Perspective View", "Front View", "Left View", "Right View", "Top View", "Bottom View", "Back View"];
                     for (var cIdx=0; cIdx < allCams.length; cIdx++) {
@@ -407,17 +684,20 @@
                         }
                     }
                     if(aCamsToRender.length === 0 && oActiveCam) aCamsToRender.push(oActiveCam);
-                } else if( job.cam != "" ){
+                } else if( cameraMode(job) === "named" ){
                     var allCams = Scene.getCameraList();
-                    var bFound = false;
+                    var cameraNames = [];
                     for (var cIdx=0; cIdx < allCams.length; cIdx++) {
-                        if (allCams[cIdx].name === job.cam) {
-                            aCamsToRender.push(allCams[cIdx]);
-                            bFound = true;
-                            break;
-                        }
+                        cameraNames.push({name: allCams[cIdx].name, label: allCams[cIdx].getLabel()});
                     }
-                    if (!bFound && oActiveCam) aCamsToRender.push(oActiveCam);
+                    var selectedIndex = selectedCameraIndex(cameraNames, job);
+                    if (selectedIndex < 0) {
+                        MessageBox.warning("The selected camera " + (job.camLabel || job.cam) + (selectedIndex === -2 ? " is ambiguous." : " is no longer in the scene.") + "\nChoose a camera again in Scene Options, or give cameras unique names.", "Queue Camera", "&OK");
+                        bCancelQueue = true;
+                        saveState(s, 0);
+                        break;
+                    }
+                    aCamsToRender.push(allCams[selectedIndex]);
                 } else {
                     if(oActiveCam) aCamsToRender.push(oActiveCam);
                 }
@@ -463,15 +743,18 @@
                         updateListRow(s, job.path + " [" + sProgressText + "]");
                         print(sProgressText); 
 
-                        var sSceneName = job.path.substring( job.path.lastIndexOf("/")+1, job.path.lastIndexOf(".") );
-                        var sOutFile = "";
-
-                        if (job.cam.toUpperCase() === "ALL" && aCamsToRender.length > 1) {
-                            sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sCamSafeName + "/" + sSceneName + "_" + sCamSafeName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + "_" + sCamSafeName + ".png");
-                            if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/" + sCamSafeName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
-                        } else {
-                            sOutFile = (nTotalFrames > 1) ? (sWorkingDir + sSceneName + "/" + sSceneName + "_Frame" + ("0000" + nAbsFrame).slice(-4) + ".png") : (sWorkingDir + sSceneName + ".png");
-                            if (nTotalFrames > 1) { var oD = new DzDir(sWorkingDir + sSceneName + "/"); if(!oD.exists()) oD.mkpath(oD.path()); }
+                        var sRelativeOutput = outputRelativePath(job, sCamSafeName, aCamsToRender.length, nTotalFrames, nAbsFrame);
+                        var sOutFile = sWorkingDir + sRelativeOutput;
+                        if (!claimOutput(outputOwners, sRelativeOutput, s + "/" + c + "/" + f)) {
+                            MessageBox.warning("Two queued renders would use the same output file: " + sOutFile + "\nChoose different filenames or camera names.", "Duplicate Render Output", "&OK");
+                            bCancelQueue = true;
+                            break;
+                        }
+                        var oOutputDir = new DzDir(new DzFileInfo(sOutFile).path());
+                        if (!oOutputDir.exists() && !oOutputDir.mkpath(oOutputDir.path())) {
+                            MessageBox.warning("Could not create output folder: " + oOutputDir.path(), "Render Output", "&OK");
+                            bCancelQueue = true;
+                            break;
                         }
                         
                         var oCheckFile = new DzFileInfo(sOutFile);
@@ -497,6 +780,13 @@
                             wBtnCancel.text = "STOPPING...";
                             print("--- DAZ Native Cancel Detected. Aborting Queue ---");
                         }
+                        if (!bCancelQueue) {
+                            var savedOutput = new DzFileInfo(sOutFile);
+                            if (!savedOutput.exists() || savedOutput.size() === 0) {
+                                bCancelQueue = true;
+                                MessageBox.warning("The render did not create the expected output file: " + sOutFile + "\nCheck that the output folder is writable and the file type is supported.", "Render Output", "&OK");
+                            }
+                        }
                         
                         if(bCancelQueue) break; 
                     }
@@ -513,7 +803,7 @@
                 Scene.update();
                 
                 if(bCancelQueue) break;
-                oState.frameIdx = 0; job.done = true; updateListRow(s, job.path + " [DONE]"); syncState(); 
+                oState.frameIdx = 0; job.done = true; updateListRow(s, getJobLabel(job)); syncState();
             } else { 
                 updateListRow(s, job.path + "[ERROR - FAILED TO LOAD]"); 
             }
