@@ -12,7 +12,7 @@
     var bCancelQueue = false;
     var bAutoCloseDialogs = false;
 
-    // OUTPUT HELPERS BEGIN - also exercised outside DAZ by the regression tests.
+    // OUTPUT HELPERS BEGIN
     var outputFormats = [
         { extension: "png", label: "PNG (.png)" },
         { extension: "jpg", label: "JPEG (.jpg)" },
@@ -100,6 +100,11 @@
     function collectSceneCameras(document, filename, readDocument, resolveFile) {
         var documents = {};
         documents["$" + filename] = document;
+        var cameraDefinitions = {};
+        var library = document.node_library || [];
+        for (var n = 0; n < library.length; n++) {
+            if (library[n].type === "camera") cameraDefinitions["$" + library[n].id] = library[n];
+        }
         var warnings = [];
         var cameras = [];
         function definition(uri, from, seen) {
@@ -127,7 +132,14 @@
         for (var i = 0; i < instances.length; i++) {
             var instance = instances[i];
             try {
-                var base = instance.type === "camera" ? instance : definition(instance.url || "", filename, []);
+                if (instance.type && instance.type !== "camera") continue;
+                var ref = instance.url ? dsonReference(instance.url) : {file: "", id: ""};
+                var localCamera = !ref.file ? cameraDefinitions["$" + ref.id] : null;
+                // Do not open figure/prop assets just to discover their node types.
+                // External references need camera metadata in this scene first.
+                if (!localCamera && instance.type !== "camera" && !instance.perspective && !instance.orthographic) continue;
+                var base = localCamera || (instance.type === "camera" && instance.name ? instance : definition(instance.url, filename, []));
+                if (!instance.name && !base.name && base.source) base = definition(instance.url, filename, []);
                 if (base.type !== "camera") continue;
                 var name = instance.name || base.name;
                 if (!name) throw new Error("A saved camera has no name.");
@@ -481,9 +493,6 @@
         var lblCameras = new DzLabel(wContainer);
         lblCameras.wordWrap = true;
         wLyt.addWidget(lblCameras);
-        var wRefreshCameras = new DzPushButton(wContainer);
-        wRefreshCameras.text = "Refresh cameras from saved scene";
-        wLyt.addWidget(wRefreshCameras);
         var choices;
         function populateCameras(selection) {
             var scan = scanSavedCameras(job.path);
@@ -491,15 +500,11 @@
             wEditCam.clear();
             for (var i = 0; i < choices.items.length; i++) wEditCam.addItem(choices.items[i].label);
             wEditCam.currentItem = choices.selected;
-            lblCameras.text = scan.failed ? "Could not read cameras from the saved scene. Check the file and try Refresh." :
+            lblCameras.text = scan.failed ? "Could not read cameras from the saved scene. Check the file and reopen Scene Options." :
                 (scan.warnings.length ? "Some camera information could not be read. The list may be incomplete." :
-                (scan.cameras.length ? "Cameras read from the saved file. Save camera changes before refreshing." : "No saved cameras found. You can use the saved active view."));
+                (scan.cameras.length ? "Cameras read from the saved file. Save camera changes and reopen Scene Options to update this list." : "No saved cameras found. You can use the saved active view."));
         }
         populateCameras(job);
-        wRefreshCameras.clicked.connect(function() {
-            var selected = choices.items[wEditCam.currentItem];
-            populateCameras({cam: selected.name, camLabel: selected.cameraLabel || "", camMode: selected.mode});
-        });
         
         var wEditChk = new DzCheckBox(wContainer); 
         wEditChk.text = "Render Saved Animation Range?"; 
