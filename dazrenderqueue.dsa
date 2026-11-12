@@ -97,9 +97,7 @@
         return {file: file, id: decodeURIComponent(uri.slice(hash + 1))};
     }
 
-    function collectSceneCameras(document, filename, readDocument, resolveFile) {
-        var documents = {};
-        documents["$" + filename] = document;
+    function collectSceneCameras(document) {
         var cameraDefinitions = {};
         var library = document.node_library || [];
         for (var n = 0; n < library.length; n++) {
@@ -107,43 +105,16 @@
         }
         var warnings = [];
         var cameras = [];
-        function definition(uri, from, seen) {
-            if (seen.length >= 16) throw new Error("Camera reference chain is too deep.");
-            var ref = dsonReference(uri);
-            var file = ref.file ? resolveFile(ref.file, from) : from;
-            if (!file) throw new Error("A referenced camera asset could not be found.");
-            var key = file + "#" + ref.id;
-            if (seen.indexOf(key) >= 0) throw new Error("Circular camera reference.");
-            var data = documents["$" + file];
-            if (!data) data = documents["$" + file] = readDocument(file);
-            var nodes = data.node_library || [];
-            for (var i = 0; i < nodes.length; i++) {
-                var node = nodes[i];
-                if (node.id !== ref.id) continue;
-                // A fully described camera must still be listed if its original
-                // source asset was moved. Only follow sources for missing metadata.
-                var needsSource = !node.type || (node.type === "camera" && !node.name);
-                var inherited = node.source && needsSource ? definition(node.source, file, seen.concat([key])) : {};
-                return {type: node.type || inherited.type, name: node.name || inherited.name, label: node.label || inherited.label};
-            }
-            throw new Error("A referenced node definition could not be found.");
-        }
         var instances = (document.scene || {}).nodes || [];
         for (var i = 0; i < instances.length; i++) {
             var instance = instances[i];
             try {
-                if (instance.type && instance.type !== "camera") continue;
                 var ref = instance.url ? dsonReference(instance.url) : {file: "", id: ""};
                 var localCamera = !ref.file ? cameraDefinitions["$" + ref.id] : null;
-                // Do not open figure/prop assets just to discover their node types.
-                // External references need camera metadata in this scene first.
-                if (!localCamera && instance.type !== "camera" && !instance.perspective && !instance.orthographic) continue;
-                var base = localCamera || (instance.type === "camera" && instance.name ? instance : definition(instance.url, filename, []));
-                if (!instance.name && !base.name && base.source) base = definition(instance.url, filename, []);
-                if (base.type !== "camera") continue;
-                var name = instance.name || base.name;
+                if (!localCamera) continue;
+                var name = instance.name || localCamera.name;
                 if (!name) throw new Error("A saved camera has no name.");
-                cameras.push({name: name, label: instance.label || base.label || name, id: instance.id || name});
+                cameras.push({name: name, label: instance.label || localCamera.label || name, id: instance.id || name});
             } catch (error) {
                 warnings.push(String(error));
             }
@@ -217,17 +188,7 @@
 
     function scanSavedCameras(filename) {
         try {
-            return collectSceneCameras(readCameraDocument(filename), filename, readCameraDocument, function(ref, from) {
-                if (/^[a-z]:[/\\]/i.test(ref)) {
-                    var direct = new DzFileInfo(ref);
-                    return direct.exists() && direct.isFile() ? direct.absFileName() : "";
-                }
-                if (ref.charAt(0) !== "/" && !/^[a-z]:[/\\]/i.test(ref)) {
-                    var relative = new DzFileInfo(new DzFileInfo(from).path() + "/" + ref);
-                    if (relative.exists() && relative.isFile()) return relative.absFileName();
-                }
-                return App.getContentMgr().findFile(ref);
-            });
+            return collectSceneCameras(readCameraDocument(filename));
         } catch (error) {
             return {cameras: [], warnings: [String(error)], failed: true};
         }
@@ -257,9 +218,9 @@
         oSettings.setStringValue("LastOpenDir", sPath);
     }
 
-    function getJobLabel(job) {
-        var status = job.done ? " [DONE]" : (job.override ? " [Animation]" : " [Current Frame]");
-        return outputStem(job) + "." + outputExtension(job) + status + " — " + job.path;
+    function getJobLabel(job, status) {
+        status = status || (job.done ? " [DONE]" : (job.override ? " [Animation]" : " [Current Frame]"));
+        return outputStem(job) + "." + outputExtension(job) + status + " - " + job.path;
     }
 
     function get3DViewport() {
@@ -272,7 +233,7 @@
         } catch(e) { return null; }
     }
 
-    var sLastOpenDir = loadLastDir();
+    var sLastOpenDir;
     
     var wDlg = new DzDialog();
     wDlg.caption = "Render Queue";
@@ -636,7 +597,7 @@
             if (sCurrentFile == sTargetFile) {
                 bSceneReady = true;
             } else {
-                updateListRow(s, job.path + " [LOADING...]");
+                updateListRow(s, getJobLabel(job, " [LOADING...]"));
                 Scene.clear();
                 
                 bAutoCloseDialogs = true;
@@ -680,17 +641,15 @@
                 var oActiveCam = vp3d ? vp3d.getCamera() : null;
 
                 var aCamsToRender = [];
+                var allCams = Scene.getCameraList();
                 if( cameraMode(job) === "all" ) {
-                    var allCams = Scene.getCameraList();
-                    var aDefaultCams = ["Perspective View", "Front View", "Left View", "Right View", "Top View", "Bottom View", "Back View"];
                     for (var cIdx=0; cIdx < allCams.length; cIdx++) {
-                        if(aDefaultCams.indexOf(allCams[cIdx].name) === -1) {
+                        if(!allCams[cIdx].isDefaultSceneCamera()) {
                             aCamsToRender.push(allCams[cIdx]);
                         }
                     }
                     if(aCamsToRender.length === 0 && oActiveCam) aCamsToRender.push(oActiveCam);
                 } else if( cameraMode(job) === "named" ){
-                    var allCams = Scene.getCameraList();
                     var cameraNames = [];
                     for (var cIdx=0; cIdx < allCams.length; cIdx++) {
                         cameraNames.push({name: allCams[cIdx].name, label: allCams[cIdx].getLabel()});
@@ -723,7 +682,8 @@
 
                 var nTotalFrames = (nEndFrame - nStartFrame) + 1;
                 
-                for( var f = oState.frameIdx; f < nTotalFrames; f++ ){
+                var nResumeFrame = oState.frameIdx < nTotalFrames ? oState.frameIdx : 0;
+                for( var f = nResumeFrame; f < nTotalFrames; f++ ){
                     if(bCancelQueue) { break; }
 
                     var nAbsFrame = nStartFrame + f;
@@ -741,11 +701,11 @@
 
                     for( var c = 0; c < aCamsToRender.length; c++ ) {
                         var currentCam = aCamsToRender[c];
-                        var vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(currentCam);
+                        vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(currentCam);
 
                         var sCamSafeName = currentCam.getLabel().replace(/[^a-z0-9_-]/gi, '_');
                         var sProgressText = "Scene " + (s+1) + "/" + aQueue.length + " (F: " + (f+1) + "/" + nTotalFrames + ") [Cam: " + currentCam.getLabel() + "]";
-                        updateListRow(s, job.path + " [" + sProgressText + "]");
+                        updateListRow(s, getJobLabel(job, " [" + sProgressText + "]"));
                         print(sProgressText); 
 
                         var sRelativeOutput = outputRelativePath(job, sCamSafeName, aCamsToRender.length, nTotalFrames, nAbsFrame);
@@ -803,14 +763,14 @@
                 oOpt.isCurrentFrameRender = bOrigIsCurrentFrameRender;
                 Scene.setTime( nOrigTime ); 
                 if(oActiveCam) {
-                    var vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(oActiveCam);
+                    vp3d = get3DViewport(); if (vp3d) vp3d.setCamera(oActiveCam);
                 }
                 Scene.update();
                 
                 if(bCancelQueue) break;
                 oState.frameIdx = 0; job.done = true; updateListRow(s, getJobLabel(job)); syncState();
             } else { 
-                updateListRow(s, job.path + "[ERROR - FAILED TO LOAD]"); 
+                updateListRow(s, getJobLabel(job, " [ERROR - FAILED TO LOAD]")); 
             }
         }
         
